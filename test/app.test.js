@@ -104,6 +104,18 @@ test('文件名和下载范围校验', () => {
   assert.throws(() => parseByteRange('bytes=10-12', 10), /范围无效/u);
 });
 
+test('VERSION 与 npm 元数据遵循版本约定', async () => {
+  const rootDir = path.join(__dirname, '..');
+  const version = (await fs.readFile(path.join(rootDir, 'VERSION'), 'utf8')).trim();
+  const packageMetadata = JSON.parse(await fs.readFile(path.join(rootDir, 'package.json'), 'utf8'));
+  const packageLock = JSON.parse(await fs.readFile(path.join(rootDir, 'package-lock.json'), 'utf8'));
+
+  assert.match(version, /^\d+\.\d+\.(?:[1-9]\d)$/u);
+  assert.equal(packageMetadata.version, version);
+  assert.equal(packageLock.version, version);
+  assert.equal(packageLock.packages[''].version, version);
+});
+
 function connectClient(baseUrl, name, deviceId = `device-${Date.now()}-${Math.random()}`) {
   return new Promise((resolve, reject) => {
     const socketUrl = new URL('/ws', baseUrl);
