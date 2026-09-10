@@ -50,6 +50,8 @@ const state = {
   uploads: new Map(),
 };
 
+const mobileChatMedia = window.matchMedia('(max-width: 900px)');
+
 init();
 
 function init() {
@@ -111,6 +113,7 @@ function bindEvents() {
   bindDropZone();
 
   elements.refreshFiles.addEventListener('click', refreshFiles);
+  mobileChatMedia.addEventListener('change', updateChatEmptyState);
   window.addEventListener('beforeunload', (event) => {
     if ([...state.uploads.values()].some((upload) => upload.status === 'uploading')) {
       event.preventDefault();
@@ -208,6 +211,8 @@ function setConnectionState(kind, label) {
   elements.connectionState.classList.toggle('connected', kind === 'connected');
   elements.connectionState.classList.toggle('reconnecting', kind === 'reconnecting');
   elements.connectionLabel.textContent = label;
+  elements.connectionState.title = label;
+  elements.connectionState.setAttribute('aria-label', label);
   elements.sendButton.disabled = kind !== 'connected';
 }
 
@@ -303,7 +308,7 @@ function renderHistory(messages) {
   state.messageIds.clear();
   for (const row of elements.messages.querySelectorAll('.message-row')) row.remove();
   for (const message of messages) appendMessage(message, false);
-  elements.chatEmpty.hidden = state.messageIds.size > 0;
+  updateChatEmptyState();
   elements.messages.scrollTop = elements.messages.scrollHeight;
   refreshIcons();
 }
@@ -318,7 +323,7 @@ function appendMessage(message, animateScroll = true) {
 
   const own = message.sender?.id === state.clientId;
   const row = document.createElement('article');
-  row.className = `message-row${own ? ' own' : ''}`;
+  row.className = `message-row${own ? ' own' : ''}${message.kind === 'file' ? ' file-message-row' : ''}`;
   row.dataset.messageId = message.id;
 
   const avatar = document.createElement('div');
@@ -355,6 +360,7 @@ function appendMessage(message, animateScroll = true) {
 
   row.append(avatar, content);
   elements.messages.append(row);
+  updateChatEmptyState();
   refreshIcons();
 
   if (!animateScroll || wasNearBottom || own) {
@@ -404,6 +410,13 @@ function clearMessageView() {
   state.messageIds.clear();
   elements.chatEmpty.hidden = false;
   showToast('已清空当前显示');
+}
+
+function updateChatEmptyState() {
+  const selector = mobileChatMedia.matches
+    ? '.message-row:not(.file-message-row)'
+    : '.message-row';
+  elements.chatEmpty.hidden = Boolean(elements.messages.querySelector(selector));
 }
 
 function replaceFiles(files) {
@@ -653,6 +666,8 @@ function updateUploadSummary() {
 function renderPresence() {
   const count = state.users.length;
   elements.onlineCount.textContent = `${count} 人在线`;
+  elements.onlineButton.title = `${count} 人在线`;
+  elements.onlineButton.setAttribute('aria-label', `${count} 人在线，查看在线成员`);
   elements.peopleSummary.textContent = `${count} 台设备已连接`;
   elements.peopleList.replaceChildren();
 

@@ -1,6 +1,6 @@
 {
   "name": "landrop",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "private": true,
   "license": "Apache-2.0",
   "description": "A lightweight LAN chat and file sharing page.",
