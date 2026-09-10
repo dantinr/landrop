@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#16755b">
+    <title>邻传</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/vendor/lucide.min.js" defer></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand" aria-label="邻传">
+          <img src="/favicon.svg" width="34" height="34" alt="">
+          <div>
+            <h1>邻传</h1>
+            <span>局域网共享空间</span>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="connection-state" id="connection-state" role="status">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="connection-label">正在连接</span>
+          </div>
+          <button class="online-button" id="online-button" type="button" title="查看在线成员">
+            <i data-lucide="users" aria-hidden="true"></i>
+            <span id="online-count">0 人在线</span>
+          </button>
+          <label class="name-field">
+            <span>我的昵称</span>
+            <input id="name-input" type="text" maxlength="24" autocomplete="off" spellcheck="false">
+          </label>
+          <button class="icon-button" id="copy-address" type="button" title="复制当前地址" aria-label="复制当前地址">
+            <i data-lucide="copy" aria-hidden="true"></i>
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="chat-panel" aria-labelledby="chat-title">
+          <div class="panel-heading chat-heading">
+            <div>
+              <h2 id="chat-title">聊天</h2>
+              <p id="server-name">公共房间</p>
+            </div>
+            <button class="icon-button" id="clear-view" type="button" title="清空当前显示" aria-label="清空当前显示">
+              <i data-lucide="eraser" aria-hidden="true"></i>
+            </button>
+          </div>
+
+          <div class="messages" id="messages" aria-live="polite" aria-label="聊天消息">
+            <div class="empty-state" id="chat-empty">
+              <div class="empty-icon"><i data-lucide="message-circle" aria-hidden="true"></i></div>
+              <strong>还没有消息</strong>
+              <span>发一条消息开始聊天</span>
+            </div>
+          </div>
+
+          <div class="typing-line" id="typing-line" aria-live="polite"></div>
+
+          <form class="composer" id="message-form">
+            <textarea
+              id="message-input"
+              rows="1"
+              maxlength="2000"
+              placeholder="输入消息"
+              aria-label="输入消息"
+            ></textarea>
+            <button class="send-button" id="send-button" type="submit" title="发送消息" aria-label="发送消息">
+              <i data-lucide="send" aria-hidden="true"></i>
+            </button>
+          </form>
+        </section>
+
+        <aside class="transfer-panel" aria-labelledby="upload-title">
+          <div class="panel-heading">
+            <div>
+              <h2 id="upload-title">发送文件</h2>
+              <p>上传后自动发到聊天中</p>
+            </div>
+            <button class="icon-button" id="choose-files-top" type="button" title="选择文件" aria-label="选择文件">
+              <i data-lucide="plus" aria-hidden="true"></i>
+            </button>
+          </div>
+
+          <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-label="选择或拖拽文件上传">
+            <div class="drop-icon"><i data-lucide="upload-cloud" aria-hidden="true"></i></div>
+            <strong>拖拽文件到这里</strong>
+            <span>或</span>
+            <button class="secondary-button" id="choose-files" type="button">
+              <i data-lucide="folder-open" aria-hidden="true"></i>
+              选择文件
+            </button>
+            <input id="file-input" type="file" multiple hidden>
+          </div>
+
+          <section class="upload-section" id="upload-section" hidden aria-labelledby="upload-queue-title">
+            <div class="section-title-row">
+              <h3 id="upload-queue-title">正在上传</h3>
+              <span id="upload-summary"></span>
+            </div>
+            <div class="upload-list" id="upload-list"></div>
+          </section>
+
+          <section class="recent-section" aria-labelledby="recent-title">
+            <div class="section-title-row">
+              <h3 id="recent-title">最近文件</h3>
+              <div class="recent-tools">
+                <span id="storage-label"></span>
+                <button class="small-icon-button" id="refresh-files" type="button" title="刷新文件" aria-label="刷新文件">
+                  <i data-lucide="refresh-cw" aria-hidden="true"></i>
+                </button>
+              </div>
+            </div>
+            <div class="file-list" id="file-list">
+              <div class="files-empty" id="files-empty">暂无文件</div>
+            </div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <dialog class="people-dialog" id="people-dialog">
+      <div class="dialog-heading">
+        <div>
+          <h2>在线成员</h2>
+          <p id="people-summary"></p>
+        </div>
+        <button class="icon-button" id="close-people" type="button" title="关闭" aria-label="关闭">
+          <i data-lucide="x" aria-hidden="true"></i>
+        </button>
+      </div>
+      <div class="people-list" id="people-list"></div>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="polite"></div>
+  </body>
+</html>
