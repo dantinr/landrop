@@ -74,7 +74,7 @@ class FileStore {
     }
   }
 
-  async receive(request, details) {
+  async receive(request, details, onProgress = null) {
     const id = crypto.randomUUID();
     const temporaryPath = path.join(this.tempDir, `${id}.part`);
     const finalPath = this.pathFor(id);
@@ -86,9 +86,10 @@ class FileStore {
     try {
       handle = await fsp.open(temporaryPath, 'wx');
       for await (const chunk of request) {
+        await writeAll(handle, chunk);
         bytesWritten += chunk.length;
         hash.update(chunk);
-        await writeAll(handle, chunk);
+        if (typeof onProgress === 'function') onProgress(bytesWritten);
       }
 
       if (request.aborted) {

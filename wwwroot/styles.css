@@ -477,6 +477,12 @@ textarea:focus-visible,
   font-size: 11px;
 }
 
+.upload-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .download-button {
   display: grid;
   place-items: center;
@@ -670,6 +676,11 @@ textarea:focus-visible,
   transition: width 100ms linear;
 }
 
+.upload-progress.indeterminate .upload-progress-bar {
+  width: 100%;
+  opacity: 0.35;
+}
+
 .upload-item.done .upload-progress-bar {
   background: #29916d;
 }
@@ -680,6 +691,22 @@ textarea:focus-visible,
 
 .cancel-upload {
   align-self: center;
+}
+
+.network-upload-indicator {
+  display: grid;
+  align-self: center;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 7px;
+}
+
+.network-upload-indicator svg {
+  width: 18px;
+  height: 18px;
 }
 
 .recent-section {
@@ -699,7 +726,8 @@ textarea:focus-visible,
 
 .file-list {
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .files-empty {
@@ -712,7 +740,7 @@ textarea:focus-visible,
 
 .recent-file {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) 32px;
+  grid-template-columns: 36px minmax(0, 1fr) 34px;
   align-items: center;
   gap: 9px;
   min-height: 58px;

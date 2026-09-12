@@ -48,6 +48,7 @@ const state = {
   users: [],
   typingUsers: new Map(),
   uploads: new Map(),
+  networkUploads: new Map(),
 };
 
 const mobileChatMedia = window.matchMedia('(max-width: 900px)');
@@ -152,6 +153,8 @@ function connectSocket() {
     if (socket !== state.socket) return;
     state.connected = false;
     state.clientId = null;
+    state.networkUploads.clear();
+    renderNetworkUploads();
     setConnectionState('reconnecting', '连接已断开');
     state.reconnectTimer = setTimeout(connectSocket, state.reconnectDelay);
     state.reconnectDelay = Math.min(state.reconnectDelay * 1.7, 8_000);
@@ -170,6 +173,7 @@ function handleSocketPayload(payload) {
     elements.serverName.textContent = `${payload.serverName || '局域网'} · 公共房间`;
     renderHistory(payload.history || []);
     replaceFiles(payload.files || []);
+    replaceNetworkUploads(payload.uploads || []);
     sendSocket({ type: 'join', name: currentName() });
     setConnectionState('connected', '已连接');
     return;
@@ -193,6 +197,11 @@ function handleSocketPayload(payload) {
 
   if (payload.type === 'typing') {
     updateTypingUser(payload);
+    return;
+  }
+
+  if (payload.type === 'uploads') {
+    replaceNetworkUploads(payload.uploads || []);
     return;
   }
 
@@ -559,6 +568,8 @@ function startUpload(file) {
   xhr.setRequestHeader('X-File-Name', encodeBase64Url(file.name));
   xhr.setRequestHeader('X-File-Type', file.type || 'application/octet-stream');
   xhr.setRequestHeader('X-Client-Id', state.clientId);
+  xhr.setRequestHeader('X-Upload-Id', upload.id);
+  xhr.setRequestHeader('X-File-Size', String(file.size));
 
   xhr.upload.addEventListener('progress', (event) => updateUploadProgress(upload, event));
   xhr.addEventListener('load', () => {
@@ -577,7 +588,7 @@ function startUpload(file) {
 
 function createUploadRow(upload) {
   const row = document.createElement('div');
-  row.className = 'upload-item';
+  row.className = 'upload-item local-upload';
   row.dataset.uploadId = upload.id;
 
   const info = document.createElement('div');
@@ -592,6 +603,7 @@ function createUploadRow(upload) {
   const progress = document.createElement('div');
   progress.className = 'upload-progress';
   progress.setAttribute('role', 'progressbar');
+  progress.setAttribute('aria-label', `${upload.file.name} 上传进度`);
   progress.setAttribute('aria-valuemin', '0');
   progress.setAttribute('aria-valuemax', '100');
   const bar = document.createElement('div');
@@ -627,12 +639,14 @@ function updateUploadProgress(upload, event) {
     ? Math.min(100, (event.loaded / event.total) * 100)
     : 0;
   const progressElement = upload.row.querySelector('.upload-progress');
-  progressElement.setAttribute('aria-valuenow', String(Math.round(progress)));
+  const roundedProgress = Math.round(progress);
+  progressElement.setAttribute('aria-valuenow', String(roundedProgress));
+  progressElement.setAttribute('aria-valuetext', `${roundedProgress}%`);
   upload.row.querySelector('.upload-progress-bar').style.width = `${progress}%`;
 
   const remaining = upload.speed > 0 ? (upload.file.size - event.loaded) / upload.speed : null;
   const details = [
-    `${Math.round(progress)}%`,
+    `${roundedProgress}%`,
     upload.speed > 0 ? `${formatBytes(upload.speed)}/s` : null,
     remaining !== null && remaining > 1 ? `约 ${formatDuration(remaining)}` : null,
   ].filter(Boolean).join(' · ');
@@ -656,11 +670,128 @@ function finishUpload(upload, status, message) {
 
 function updateUploadSummary() {
   const uploads = [...state.uploads.values()];
-  const active = uploads.filter((upload) => upload.status === 'uploading').length;
+  const activeIds = new Set(state.networkUploads.keys());
+  for (const upload of uploads) {
+    if (upload.status === 'uploading') activeIds.add(upload.id);
+  }
+  const active = activeIds.size;
   const failed = uploads.filter((upload) => upload.status === 'failed').length;
-  elements.uploadSummary.textContent = active > 0
-    ? `${active} 个任务`
-    : failed > 0 ? `${failed} 个未完成` : '全部完成';
+  const summary = [];
+  if (active > 0) summary.push(`${active} 个正在上传`);
+  if (failed > 0) summary.push(`${failed} 个未完成`);
+  const summaryText = summary.join(' · ') || '全部完成';
+  if (elements.uploadSummary.textContent !== summaryText) {
+    elements.uploadSummary.textContent = summaryText;
+  }
+  elements.uploadSection.hidden = state.uploads.size === 0 && state.networkUploads.size === 0;
+}
+
+function replaceNetworkUploads(uploads) {
+  state.networkUploads.clear();
+  for (const upload of uploads) {
+    if (upload?.id && upload?.name) state.networkUploads.set(upload.id, upload);
+  }
+  renderNetworkUploads();
+}
+
+function renderNetworkUploads() {
+  const visibleUploads = new Map(
+    [...state.networkUploads.entries()].filter(([id]) => !state.uploads.has(id)),
+  );
+  const existingRows = new Map(
+    [...elements.uploadList.querySelectorAll('.network-upload')]
+      .map((row) => [row.dataset.uploadId, row]),
+  );
+
+  for (const [id, row] of existingRows) {
+    if (!visibleUploads.has(id)) row.remove();
+  }
+
+  let addedRow = false;
+  const orderedUploads = [...visibleUploads.values()].sort((left, right) => (
+    String(left.startedAt).localeCompare(String(right.startedAt))
+  ));
+  for (const upload of orderedUploads) {
+    let row = existingRows.get(upload.id);
+    if (!row) {
+      row = createNetworkUploadRow(upload);
+      elements.uploadList.prepend(row);
+      addedRow = true;
+    }
+    updateNetworkUploadRow(row, upload);
+  }
+
+  updateUploadSummary();
+  if (addedRow) refreshIcons();
+}
+
+function createNetworkUploadRow(upload) {
+  const row = document.createElement('div');
+  row.className = 'upload-item network-upload';
+  row.dataset.uploadId = upload.id;
+
+  const info = document.createElement('div');
+  info.className = 'upload-info';
+  const name = document.createElement('span');
+  name.className = 'upload-name';
+  const meta = document.createElement('span');
+  meta.className = 'upload-meta';
+  const progress = document.createElement('div');
+  progress.className = 'upload-progress';
+  progress.setAttribute('role', 'progressbar');
+  progress.setAttribute('aria-label', `${upload.name} 上传进度`);
+  progress.setAttribute('aria-valuemin', '0');
+  progress.setAttribute('aria-valuemax', '100');
+  const bar = document.createElement('div');
+  bar.className = 'upload-progress-bar';
+  progress.append(bar);
+  info.append(name, meta, progress);
+
+  const indicator = document.createElement('div');
+  indicator.className = 'network-upload-indicator';
+  indicator.setAttribute('aria-hidden', 'true');
+  indicator.append(createIcon('cloud-upload'));
+  row.append(info, indicator);
+  return row;
+}
+
+function updateNetworkUploadRow(row, upload) {
+  const name = row.querySelector('.upload-name');
+  name.textContent = upload.name;
+  name.title = upload.name;
+
+  const receivedBytes = Number.isFinite(Number(upload.receivedBytes))
+    ? Math.max(0, Number(upload.receivedBytes))
+    : 0;
+  const totalBytes = Number.isFinite(Number(upload.totalBytes))
+    ? Math.max(0, Number(upload.totalBytes))
+    : null;
+  const hasTotal = totalBytes !== null && totalBytes > 0;
+  const progress = hasTotal ? Math.min(100, (receivedBytes / totalBytes) * 100) : null;
+  const progressElement = row.querySelector('.upload-progress');
+  const progressBar = row.querySelector('.upload-progress-bar');
+  progressElement.classList.toggle('indeterminate', progress === null);
+
+  let progressLabel;
+  if (progress === null) {
+    progressElement.removeAttribute('aria-valuenow');
+    progressBar.style.width = '';
+    progressLabel = `${formatBytes(receivedBytes)} 已接收`;
+  } else {
+    const roundedProgress = Math.round(progress);
+    progressElement.setAttribute('aria-valuenow', String(roundedProgress));
+    progressBar.style.width = `${progress}%`;
+    progressLabel = `${roundedProgress}% · ${formatBytes(receivedBytes)} / ${formatBytes(totalBytes)}`;
+  }
+  progressElement.setAttribute('aria-valuetext', progressLabel);
+  const meta = row.querySelector('.upload-meta');
+  meta.textContent = `${formatSenderIdentity(upload.sender)} · ${progressLabel}`;
+  meta.title = meta.textContent;
+}
+
+function formatSenderIdentity(sender) {
+  const name = sender?.name || '访客';
+  return sender?.ip ? `${name}[${sender.ip}]` : name;
 }
 
 function renderPresence() {

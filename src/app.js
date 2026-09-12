@@ -39,7 +39,26 @@ async function createLanDropServer(options = {}) {
   await Promise.all([fileStore.init(), chatStore.init()]);
 
   const clients = new Set();
+  const activeUploads = new Map();
+  let uploadBroadcastTimer = null;
   const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
+
+  const broadcastUploadsNow = () => {
+    if (uploadBroadcastTimer) {
+      clearTimeout(uploadBroadcastTimer);
+      uploadBroadcastTimer = null;
+    }
+    broadcast(clients, { type: 'uploads', uploads: publicActiveUploads(activeUploads) });
+  };
+
+  const scheduleUploadBroadcast = () => {
+    if (uploadBroadcastTimer) return;
+    uploadBroadcastTimer = setTimeout(() => {
+      uploadBroadcastTimer = null;
+      broadcast(clients, { type: 'uploads', uploads: publicActiveUploads(activeUploads) });
+    }, 250);
+    uploadBroadcastTimer.unref();
+  };
 
   const server = http.createServer(async (request, response) => {
     applySecurityHeaders(response);
@@ -62,6 +81,14 @@ async function createLanDropServer(options = {}) {
         assertSameOrigin(request);
         const fileName = decodeFileName(singleHeader(request.headers['x-file-name']));
         const mimeType = normalizeMimeType(singleHeader(request.headers['x-file-type']));
+        const uploadId = normalizeUploadId(singleHeader(request.headers['x-upload-id']));
+        const totalBytes = parseUploadSize(
+          singleHeader(request.headers['content-length']),
+          singleHeader(request.headers['x-file-size']),
+        );
+        if (activeUploads.has(uploadId)) {
+          throw new HttpError(409, '上传任务编号重复', 'DUPLICATE_UPLOAD_ID');
+        }
         const claimedClientId = singleHeader(request.headers['x-client-id']);
         const connectedClient = Array.from(clients).find((client) => client.id === claimedClientId);
         const sender = connectedClient
@@ -71,20 +98,45 @@ async function createLanDropServer(options = {}) {
               name: normalizeUserName(singleHeader(request.headers['x-client-name'])),
               ip: remoteAddress(request),
             };
-        const file = await fileStore.receive(request, { fileName, mimeType, sender });
-        const message = {
-          id: crypto.randomUUID(),
-          kind: 'file',
+        const activeUpload = {
+          id: uploadId,
+          name: fileName,
+          totalBytes,
+          receivedBytes: 0,
           sender,
-          file: publicFile(file),
-          createdAt: file.createdAt,
+          startedAt: new Date().toISOString(),
         };
+        activeUploads.set(uploadId, activeUpload);
+        broadcastUploadsNow();
 
-        await chatStore.add(message).catch((error) => {
-          console.error('保存聊天记录失败:', error.message);
-        });
-        broadcast(clients, { type: 'message', message });
-        return sendJson(response, 201, { file: publicFile(file), message });
+        try {
+          const file = await fileStore.receive(
+            request,
+            { fileName, mimeType, sender },
+            (receivedBytes) => {
+              activeUpload.receivedBytes = receivedBytes;
+              scheduleUploadBroadcast();
+            },
+          );
+          activeUpload.receivedBytes = file.size;
+          activeUpload.totalBytes = file.size;
+          const message = {
+            id: crypto.randomUUID(),
+            kind: 'file',
+            sender,
+            file: publicFile(file),
+            createdAt: file.createdAt,
+          };
+
+          await chatStore.add(message).catch((error) => {
+            console.error('保存聊天记录失败:', error.message);
+          });
+          broadcast(clients, { type: 'message', message });
+          return sendJson(response, 201, { file: publicFile(file), message });
+        } finally {
+          if (activeUploads.get(uploadId) === activeUpload) activeUploads.delete(uploadId);
+          broadcastUploadsNow();
+        }
       }
 
       const downloadMatch = /^\/api\/files\/([^/]+)\/download$/u.exec(requestUrl.pathname);
@@ -140,6 +192,7 @@ async function createLanDropServer(options = {}) {
       clientId: client.id,
       history: chatStore.list(),
       files: fileStore.list().map(publicFile),
+      uploads: publicActiveUploads(activeUploads),
       serverName,
     });
 
@@ -232,6 +285,8 @@ async function createLanDropServer(options = {}) {
     },
     async stop() {
       clearInterval(heartbeat);
+      clearTimeout(uploadBroadcastTimer);
+      uploadBroadcastTimer = null;
       for (const client of clients) client.webSocket.terminate();
       await new Promise((resolve) => wss.close(() => resolve()));
       if (!server.listening) return;
@@ -274,6 +329,19 @@ function publicFile(file) {
   };
 }
 
+function publicActiveUploads(activeUploads) {
+  return Array.from(activeUploads.values())
+    .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+    .map((upload) => ({
+      id: upload.id,
+      name: upload.name,
+      totalBytes: upload.totalBytes,
+      receivedBytes: upload.receivedBytes,
+      sender: structuredClone(upload.sender),
+      startedAt: upload.startedAt,
+    }));
+}
+
 function readyClients(clients) {
   return Array.from(clients).filter((client) => client.ready);
 }
@@ -291,15 +359,41 @@ function broadcast(clients, payload, excludedClient = null) {
   const encoded = JSON.stringify(payload);
   for (const client of clients) {
     if (client !== excludedClient && client.webSocket.readyState === WebSocket.OPEN) {
-      client.webSocket.send(encoded);
+      try {
+        client.webSocket.send(encoded);
+      } catch {
+        client.webSocket.terminate();
+      }
     }
   }
 }
 
 function sendSocket(webSocket, payload) {
   if (webSocket.readyState === WebSocket.OPEN) {
-    webSocket.send(JSON.stringify(payload));
+    try {
+      webSocket.send(JSON.stringify(payload));
+    } catch {
+      webSocket.terminate();
+    }
   }
+}
+
+function normalizeUploadId(value) {
+  if (value === undefined || value === null || value === '') return crypto.randomUUID();
+  if (typeof value !== 'string' || !/^[a-z0-9_-]{8,80}$/iu.test(value)) {
+    throw new HttpError(400, '上传任务编号无效', 'INVALID_UPLOAD_ID');
+  }
+  return value;
+}
+
+function parseUploadSize(contentLength, advertisedSize) {
+  return parseNonNegativeInteger(contentLength) ?? parseNonNegativeInteger(advertisedSize);
+}
+
+function parseNonNegativeInteger(value) {
+  if (typeof value !== 'string' || !/^\d+$/u.test(value)) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) ? number : null;
 }
 
 function socketError(webSocket, message) {
