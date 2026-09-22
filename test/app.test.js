@@ -1,13 +1,16 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
+const { Readable } = require('node:stream');
 const test = require('node:test');
 const { WebSocket } = require('ws');
 const { createLanDropServer } = require('../src/app');
+const { FileStore } = require('../src/file-store');
 const { decodeFileName, parseByteRange } = require('../src/validation');
 
 test('聊天、上传、文件广播和下载可以完整工作', async (context) => {
@@ -61,6 +64,15 @@ test('聊天、上传、文件广播和下载可以完整工作', async (context
   const uploadResult = await upload.json();
   assert.equal(uploadResult.file.name, fileName);
   assert.equal(uploadResult.file.size, payload.length);
+  assert.equal(uploadResult.file.storedName, undefined);
+
+  const storedName = '家庭资料 测试[127.0.0.1].txt';
+  assert.deepEqual(
+    await fs.readFile(path.join(dataDir, 'uploads', storedName)),
+    payload,
+  );
+  const fileIndex = JSON.parse(await fs.readFile(path.join(dataDir, 'files.json'), 'utf8'));
+  assert.equal(fileIndex.find((file) => file.id === uploadResult.file.id).storedName, storedName);
 
   const fileNotice = await bob.inbox.waitFor((message) => (
     message.type === 'message' && message.message?.kind === 'file'
@@ -279,7 +291,11 @@ test('并发、重复编号和中断不会留下过期上传状态', async (cont
     message.type === 'uploads' && message.uploads?.length === 0
   ));
 
-  assert.deepEqual(await fs.readdir(path.join(dataDir, 'uploads')), []);
+  assert.deepEqual(await fs.readdir(path.join(dataDir, 'incoming')), []);
+  assert.deepEqual(
+    await fs.readdir(path.join(dataDir, 'uploads')),
+    ['other[127.0.0.1].bin'],
+  );
   assert.deepEqual(app.fileStore.list().map((file) => file.name), ['other.bin']);
   const storedMessages = JSON.parse(
     await fs.readFile(path.join(dataDir, 'messages.json'), 'utf8'),
@@ -301,6 +317,130 @@ test('并发、重复编号和中断不会留下过期上传状态', async (cont
   assert.deepEqual(
     app.fileStore.list().map((file) => file.name).sort(),
     ['other.bin', 'reused.bin'],
+  );
+});
+
+test('上传文件以原名和 IP 保存，同名文件不会覆盖', async (context) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-file-store-test-'));
+  const uploadsDir = path.join(dataDir, 'uploads');
+  const incomingDir = path.join(dataDir, 'incoming');
+  const store = new FileStore(dataDir);
+  await store.init();
+
+  context.after(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true });
+  });
+
+  const orphanName = '同名文件[192.168.1.23].txt';
+  await fs.writeFile(path.join(uploadsDir, orphanName), 'existing file');
+  const details = {
+    fileName: '同名文件.txt',
+    mimeType: 'text/plain',
+    sender: { id: 'device-test', name: '书房电脑', ip: '192.168.1.23' },
+  };
+  const [first, second] = await Promise.all([
+    store.receive(Readable.from([Buffer.from('first upload')]), details),
+    store.receive(Readable.from([Buffer.from('second upload')]), details),
+  ]);
+
+  assert.deepEqual(
+    new Set([first.storedName, second.storedName]),
+    new Set([
+      '同名文件[192.168.1.23] (2).txt',
+      '同名文件[192.168.1.23] (3).txt',
+    ]),
+  );
+  assert.equal(await fs.readFile(path.join(uploadsDir, orphanName), 'utf8'), 'existing file');
+  assert.deepEqual(
+    new Set(await Promise.all([first, second].map(async (file) => (
+      fs.readFile(store.pathFor(file.id), 'utf8')
+    )))),
+    new Set(['first upload', 'second upload']),
+  );
+
+  const originalLongName = `${'资料'.repeat(120)}:备份?.tar.gz`;
+  const ipv6File = await store.receive(
+    Readable.from([Buffer.from('ipv6 upload')]),
+    {
+      fileName: originalLongName,
+      mimeType: 'application/gzip',
+      sender: { id: 'device-ipv6', name: 'IPv6 电脑', ip: 'fe80::1' },
+    },
+  );
+  assert.equal(ipv6File.name, originalLongName);
+  assert.match(ipv6File.storedName, /\[fe80__1\]\.gz$/u);
+  assert.doesNotMatch(ipv6File.storedName, /[<>:"/\\|?*\u0000-\u001f]/u);
+  assert.equal(ipv6File.storedName.length <= 240, true);
+  assert.equal(Buffer.byteLength(ipv6File.storedName) <= 240, true);
+
+  const interruptedId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  await fs.writeFile(path.join(incomingDir, `${interruptedId}.part`), 'interrupted');
+  await fs.writeFile(path.join(uploadsDir, `${interruptedId}.part`), 'old interrupted');
+  await fs.writeFile(path.join(uploadsDir, 'keep.part'), 'real file');
+
+  const restartedStore = new FileStore(dataDir);
+  await restartedStore.init();
+  assert.equal(restartedStore.list().length, 3);
+  assert.equal(await fs.readFile(restartedStore.pathFor(ipv6File.id), 'utf8'), 'ipv6 upload');
+  await assert.rejects(fs.access(path.join(incomingDir, `${interruptedId}.part`)), { code: 'ENOENT' });
+  await assert.rejects(fs.access(path.join(uploadsDir, `${interruptedId}.part`)), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(path.join(uploadsDir, 'keep.part'), 'utf8'), 'real file');
+});
+
+test('旧版 UUID 和原名文件仍可在升级后读取', async (context) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-legacy-file-test-'));
+  const legacyFilesDir = path.join(dataDir, 'files');
+  const legacyId = '11111111-1111-4111-8111-111111111111';
+  const invalidId = '22222222-2222-4222-8222-222222222222';
+  const originalNameId = '33333333-3333-4333-8333-333333333333';
+  const mismatchedId = '44444444-4444-4444-8444-444444444444';
+  const content = Buffer.from('legacy content');
+  const originalNameContent = Buffer.from('original-name content');
+  await fs.mkdir(legacyFilesDir, { recursive: true });
+  await fs.writeFile(path.join(legacyFilesDir, `${legacyId}.blob`), content);
+  await fs.writeFile(path.join(legacyFilesDir, 'original-name.txt'), originalNameContent);
+  const baseRecord = {
+    name: 'legacy.txt',
+    size: content.length,
+    mimeType: 'text/plain',
+    sha256: 'legacy-test-hash',
+    createdAt: '2026-09-22T00:00:00.000Z',
+    sender: { id: 'legacy-device', name: '旧设备', ip: '192.168.1.10' },
+  };
+  await fs.writeFile(path.join(dataDir, 'files.json'), JSON.stringify([
+    { id: legacyId, ...baseRecord },
+    {
+      id: mismatchedId,
+      ...baseRecord,
+      name: 'original-name.txt',
+      size: originalNameContent.length,
+      sha256: '0'.repeat(64),
+    },
+    {
+      id: originalNameId,
+      ...baseRecord,
+      name: 'original-name.txt',
+      size: originalNameContent.length,
+      sha256: crypto.createHash('sha256').update(originalNameContent).digest('hex'),
+    },
+    { id: invalidId, ...baseRecord, storedName: '../escape.txt' },
+  ]));
+
+  context.after(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true });
+  });
+
+  const store = new FileStore(dataDir);
+  await store.init();
+  assert.deepEqual(
+    new Set(store.list().map((file) => file.id)),
+    new Set([legacyId, originalNameId]),
+  );
+  assert.deepEqual(await fs.readFile(store.pathFor(legacyId)), content);
+  assert.deepEqual(await fs.readFile(store.pathFor(originalNameId)), originalNameContent);
+  assert.deepEqual(
+    JSON.parse(await fs.readFile(path.join(dataDir, 'files.json'), 'utf8')).map((file) => file.id),
+    [legacyId, originalNameId],
   );
 });
 

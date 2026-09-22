@@ -36,7 +36,7 @@ async function main() {
   for (const address of addresses) {
     console.log('  局域网访问: ' + address);
   }
-  console.log('  文件目录:  ' + dataDir);
+  console.log('  文件目录:  ' + path.join(dataDir, 'uploads'));
   console.log('');
   console.log('  按 Ctrl+C 停止服务。');
 
