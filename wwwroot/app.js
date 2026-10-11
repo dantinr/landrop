@@ -19,6 +19,11 @@ const elements = {
   chooseFiles: document.querySelector('#choose-files'),
   dropZone: document.querySelector('#drop-zone'),
   fileInput: document.querySelector('#file-input'),
+  chooseImages: document.querySelector('#choose-images'),
+  imageInput: document.querySelector('#image-input'),
+  mobileUploadSlot: document.querySelector('#mobile-upload-slot'),
+  transferPanel: document.querySelector('.transfer-panel'),
+  recentSection: document.querySelector('.recent-section'),
   uploadSection: document.querySelector('#upload-section'),
   uploadSummary: document.querySelector('#upload-summary'),
   uploadList: document.querySelector('#upload-list'),
@@ -58,6 +63,7 @@ init();
 function init() {
   elements.nameInput.value = loadName();
   bindEvents();
+  updateResponsiveLayout();
   refreshIcons();
   connectSocket();
   refreshStatus();
@@ -111,10 +117,18 @@ function bindEvents() {
     uploadFiles(elements.fileInput.files);
     elements.fileInput.value = '';
   });
+  elements.chooseImages.addEventListener('click', () => elements.imageInput.click());
+  elements.imageInput.addEventListener('change', () => {
+    const selected = Array.from(elements.imageInput.files || []);
+    const images = selected.filter(isImageFile);
+    if (images.length !== selected.length) showToast('请选择图片文件', true);
+    uploadFiles(images);
+    elements.imageInput.value = '';
+  });
   bindDropZone();
 
   elements.refreshFiles.addEventListener('click', refreshFiles);
-  mobileChatMedia.addEventListener('change', updateChatEmptyState);
+  mobileChatMedia.addEventListener('change', updateResponsiveLayout);
   window.addEventListener('beforeunload', (event) => {
     if ([...state.uploads.values()].some((upload) => upload.status === 'uploading')) {
       event.preventDefault();
@@ -223,6 +237,7 @@ function setConnectionState(kind, label) {
   elements.connectionState.title = label;
   elements.connectionState.setAttribute('aria-label', label);
   elements.sendButton.disabled = kind !== 'connected';
+  elements.chooseImages.disabled = kind !== 'connected';
 }
 
 function loadName() {
@@ -333,6 +348,7 @@ function appendMessage(message, animateScroll = true) {
   const own = message.sender?.id === state.clientId;
   const row = document.createElement('article');
   row.className = `message-row${own ? ' own' : ''}${message.kind === 'file' ? ' file-message-row' : ''}`;
+  if (message.kind === 'file' && isImageFile(message.file)) row.classList.add('image-message-row');
   row.dataset.messageId = message.id;
 
   const avatar = document.createElement('div');
@@ -423,9 +439,27 @@ function clearMessageView() {
 
 function updateChatEmptyState() {
   const selector = mobileChatMedia.matches
-    ? '.message-row:not(.file-message-row)'
+    ? '.message-row:not(.file-message-row), .image-message-row'
     : '.message-row';
   elements.chatEmpty.hidden = Boolean(elements.messages.querySelector(selector));
+}
+
+function updateResponsiveLayout() {
+  if (mobileChatMedia.matches) {
+    elements.mobileUploadSlot.append(elements.uploadSection);
+  } else {
+    elements.transferPanel.insertBefore(elements.uploadSection, elements.recentSection);
+  }
+  updateUploadSummary();
+  updateChatEmptyState();
+}
+
+function isImageFile(file) {
+  if (!file) return false;
+  const mimeType = String(file.type || file.mimeType || '').toLowerCase();
+  if (mimeType.startsWith('image/')) return true;
+  if (mimeType && mimeType !== 'application/octet-stream') return false;
+  return /\.(?:png|jpe?g|jfif|gif|webp|bmp|avif|heic|heif|tiff?|svg|ico|apng|jxl)$/iu.test(file.name || '');
 }
 
 function replaceFiles(files) {
@@ -589,6 +623,7 @@ function startUpload(file) {
 function createUploadRow(upload) {
   const row = document.createElement('div');
   row.className = 'upload-item local-upload';
+  if (isImageFile(upload.file)) row.classList.add('image-upload');
   row.dataset.uploadId = upload.id;
 
   const info = document.createElement('div');
@@ -658,10 +693,17 @@ function finishUpload(upload, status, message) {
   upload.status = status;
   upload.row.classList.add(status);
   const bar = upload.row.querySelector('.upload-progress-bar');
-  if (status === 'done') bar.style.width = '100%';
+  if (status === 'done') {
+    bar.style.width = '100%';
+    const progress = upload.row.querySelector('.upload-progress');
+    progress.setAttribute('aria-valuenow', '100');
+    progress.setAttribute('aria-valuetext', '上传完成');
+  }
   upload.row.querySelector('.upload-meta').textContent = message;
   const button = upload.row.querySelector('.cancel-upload');
   button.replaceChildren(createIcon(status === 'done' ? 'check' : 'circle-alert'));
+  button.title = message;
+  button.setAttribute('aria-label', `${upload.file.name}：${message}`);
   button.disabled = true;
   updateUploadSummary();
   refreshIcons();
@@ -669,8 +711,11 @@ function finishUpload(upload, status, message) {
 }
 
 function updateUploadSummary() {
-  const uploads = [...state.uploads.values()];
-  const activeIds = new Set(state.networkUploads.keys());
+  const uploads = [...state.uploads.values()]
+    .filter((upload) => !mobileChatMedia.matches || isImageFile(upload.file));
+  const networkUploads = [...state.networkUploads.values()]
+    .filter((upload) => !mobileChatMedia.matches || isImageFile(upload));
+  const activeIds = new Set(networkUploads.map((upload) => upload.id));
   for (const upload of uploads) {
     if (upload.status === 'uploading') activeIds.add(upload.id);
   }
@@ -683,7 +728,8 @@ function updateUploadSummary() {
   if (elements.uploadSummary.textContent !== summaryText) {
     elements.uploadSummary.textContent = summaryText;
   }
-  elements.uploadSection.hidden = state.uploads.size === 0 && state.networkUploads.size === 0;
+  elements.uploadSection.hidden = uploads.length === 0 && networkUploads.length === 0;
+  elements.mobileUploadSlot.hidden = !mobileChatMedia.matches || elements.uploadSection.hidden;
 }
 
 function replaceNetworkUploads(uploads) {
@@ -728,6 +774,7 @@ function renderNetworkUploads() {
 function createNetworkUploadRow(upload) {
   const row = document.createElement('div');
   row.className = 'upload-item network-upload';
+  if (isImageFile(upload)) row.classList.add('image-upload');
   row.dataset.uploadId = upload.id;
 
   const info = document.createElement('div');

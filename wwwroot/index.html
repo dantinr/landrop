@@ -61,9 +61,14 @@
             </div>
           </div>
 
+          <div class="mobile-upload-slot" id="mobile-upload-slot" hidden></div>
           <div class="typing-line" id="typing-line" aria-live="polite"></div>
 
           <form class="composer" id="message-form">
+            <button class="icon-button mobile-image-button" id="choose-images" type="button" title="上传图片" aria-label="上传图片" disabled>
+              <i data-lucide="image-plus" aria-hidden="true"></i>
+            </button>
+            <input id="image-input" type="file" accept="image/*" multiple hidden>
             <textarea
               id="message-input"
               rows="1"
