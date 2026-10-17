@@ -345,6 +345,24 @@ textarea:focus-visible,
   flex-direction: row-reverse;
 }
 
+.system-message-row {
+  justify-content: center;
+  min-width: 0;
+}
+
+.system-message {
+  max-width: 100%;
+  padding: 5px 10px;
+  color: var(--muted);
+  background: #eaf0ed;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .avatar {
   display: grid;
   flex: 0 0 34px;

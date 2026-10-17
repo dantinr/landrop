@@ -209,9 +209,22 @@ async function createLanDropServer(options = {}) {
         }
 
         if (payload.type === 'join') {
+          const firstJoin = !client.ready;
+          const alreadyOnline = readyClients(clients).some((online) => online.id === client.id);
           client.name = normalizeUserName(payload.name);
           client.ready = true;
           broadcastPresence(clients);
+          if (firstJoin && !alreadyOnline) {
+            broadcast(clients, {
+              type: 'message',
+              message: {
+                id: crypto.randomUUID(),
+                kind: 'online',
+                sender: publicSender(client),
+                createdAt: new Date().toISOString(),
+              },
+            });
+          }
           return;
         }
 

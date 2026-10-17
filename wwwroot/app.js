@@ -351,39 +351,44 @@ function appendMessage(message, animateScroll = true) {
   if (message.kind === 'file' && isImageFile(message.file)) row.classList.add('image-message-row');
   row.dataset.messageId = message.id;
 
-  const avatar = document.createElement('div');
-  avatar.className = 'avatar';
-  avatar.textContent = firstCharacter(message.sender?.name || '访');
-  avatar.title = message.sender?.name || '访客';
-
-  const content = document.createElement('div');
-  content.className = 'message-content';
-
-  const meta = document.createElement('div');
-  meta.className = 'message-meta';
-  const sender = document.createElement('span');
-  sender.className = 'message-sender';
-  const senderName = message.sender?.name || '访客';
-  sender.textContent = message.sender?.ip
-    ? `${senderName}[${message.sender.ip}]`
-    : senderName;
-  sender.title = sender.textContent;
-  const time = document.createElement('time');
-  time.dateTime = message.createdAt || '';
-  time.textContent = formatTime(message.createdAt);
-  meta.append(sender, time);
-  content.append(meta);
-
-  if (message.kind === 'file' && message.file) {
-    content.append(createFileMessage(message.file));
+  if (message.kind === 'online') {
+    row.classList.add('system-message-row');
+    const notice = document.createElement('span');
+    notice.className = 'system-message';
+    notice.textContent = `${formatSenderIdentity(message.sender)} 上线了`;
+    row.append(notice);
   } else {
-    const bubble = document.createElement('div');
-    bubble.className = 'message-bubble';
-    bubble.textContent = message.text || '';
-    content.append(bubble);
-  }
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.textContent = firstCharacter(message.sender?.name || '访');
+    avatar.title = message.sender?.name || '访客';
 
-  row.append(avatar, content);
+    const content = document.createElement('div');
+    content.className = 'message-content';
+
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+    const sender = document.createElement('span');
+    sender.className = 'message-sender';
+    sender.textContent = formatSenderIdentity(message.sender);
+    sender.title = sender.textContent;
+    const time = document.createElement('time');
+    time.dateTime = message.createdAt || '';
+    time.textContent = formatTime(message.createdAt);
+    meta.append(sender, time);
+    content.append(meta);
+
+    if (message.kind === 'file' && message.file) {
+      content.append(createFileMessage(message.file));
+    } else {
+      const bubble = document.createElement('div');
+      bubble.className = 'message-bubble';
+      bubble.textContent = message.text || '';
+      content.append(bubble);
+    }
+
+    row.append(avatar, content);
+  }
   elements.messages.append(row);
   updateChatEmptyState();
   refreshIcons();

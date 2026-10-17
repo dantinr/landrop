@@ -110,6 +110,82 @@ test('聊天、上传、文件广播和下载可以完整工作', async (context
   assert.equal(unsafeUpload.status, 400);
 });
 
+test('设备上线时广播提示，改名和同设备多标签页不重复，重连后再次提示', async (context) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-online-test-'));
+  const app = await createLanDropServer({ host: '127.0.0.1', port: 0, dataDir });
+  const address = await app.start();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const sockets = [];
+
+  context.after(async () => {
+    for (const socket of sockets) socket.terminate();
+    await app.stop();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  });
+
+  const observer = await connectClient(baseUrl, '客厅电脑', 'device-online-observer');
+  sockets.push(observer.socket);
+  const ownNotice = await observer.inbox.waitFor((event) => event.message?.kind === 'online');
+  assert.equal(ownNotice.message.sender.name, '客厅电脑');
+  assert.deepEqual(observer.welcome.history, []);
+
+  const notices = [];
+  observer.socket.on('message', (buffer) => {
+    const event = JSON.parse(buffer.toString('utf8'));
+    if (event.type === 'message' && event.message?.kind === 'online') notices.push(event.message);
+  });
+
+  const sender = await connectClient(baseUrl, ' 书房电脑 ', 'device-online-sender');
+  sockets.push(sender.socket);
+  assert.equal(sender.welcome.history.some((message) => message.kind === 'online'), false);
+  const firstNotice = await observer.inbox.waitFor((event) => event.message?.kind === 'online');
+  const senderNotice = await sender.inbox.waitFor((event) => event.message?.kind === 'online');
+  assert.deepEqual(firstNotice, senderNotice);
+  assert.deepEqual(firstNotice.message.sender, {
+    id: sender.clientId, name: '书房电脑', ip: '127.0.0.1',
+  });
+  assert.equal(Number.isNaN(Date.parse(firstNotice.message.createdAt)), false);
+
+  sender.socket.send(JSON.stringify({ type: 'join', name: '新昵称' }));
+  await observer.inbox.waitFor((event) => (
+    event.type === 'presence' && event.users?.some((user) => user.name === '新昵称')
+  ));
+  sender.socket.send(JSON.stringify({ type: 'chat', text: '改名后发送' }));
+  await observer.inbox.waitFor((event) => event.message?.text === '改名后发送');
+  assert.equal(notices.length, 1);
+
+  const tab = await connectClient(baseUrl, '新昵称', sender.clientId);
+  sockets.push(tab.socket);
+  await observer.inbox.waitFor((event) => event.type === 'presence' && event.count === 3);
+  tab.socket.send(JSON.stringify({ type: 'chat', text: '另一标签页发送' }));
+  await observer.inbox.waitFor((event) => event.message?.text === '另一标签页发送');
+  assert.equal(notices.length, 1);
+
+  sender.socket.terminate();
+  await observer.inbox.waitFor((event) => event.type === 'presence' && event.count === 2);
+  tab.socket.terminate();
+  await observer.inbox.waitFor((event) => event.type === 'presence' && event.count === 1);
+  const reconnected = await connectClient(baseUrl, '新昵称', sender.clientId);
+  sockets.push(reconnected.socket);
+  const reconnectNotice = await observer.inbox.waitFor((event) => event.message?.kind === 'online');
+  assert.equal(reconnectNotice.message.sender.name, '新昵称');
+  assert.equal(reconnectNotice.message.sender.id, sender.clientId);
+  assert.notEqual(reconnectNotice.message.id, firstNotice.message.id);
+  assert.equal(notices.length, 2);
+  assert.deepEqual(reconnected.welcome.history.map((message) => message.kind), ['text', 'text']);
+
+  const unjoined = new WebSocket(`${baseUrl.replace('http:', 'ws:')}/ws`, { origin: baseUrl });
+  sockets.push(unjoined);
+  const inbox = createInbox(unjoined);
+  await inbox.waitFor((event) => event.type === 'welcome');
+  unjoined.send(JSON.stringify({ type: 'chat', text: '还没有加入' }));
+  const error = await inbox.waitFor((event) => event.type === 'error');
+  assert.equal(error.message, '请先设置昵称');
+  assert.equal(notices.length, 2);
+  const stored = JSON.parse(await fs.readFile(path.join(dataDir, 'messages.json'), 'utf8'));
+  assert.deepEqual(stored.map((message) => message.kind), ['text', 'text']);
+});
+
 test('文件名和下载范围校验', () => {
   assert.equal(decodeFileName(Buffer.from('照片 01.jpg').toString('base64url')), '照片 01.jpg');
   assert.deepEqual(parseByteRange('bytes=2-5', 10), { start: 2, end: 5 });
