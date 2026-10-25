@@ -8,6 +8,7 @@ const { JsonStore } = require('./json-store');
 const { HttpError } = require('./validation');
 
 const FILE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 const MAX_STORED_NAME_LENGTH = 240;
 const MAX_STORED_NAME_BYTES = 240;
 const INVALID_WINDOWS_NAME_CHARACTERS = /[<>:"/\\|?*\u0000-\u001f]/gu;
@@ -99,7 +100,10 @@ class FileStore {
 
     try {
       handle = await fsp.open(temporaryPath, 'wx');
-      for await (const chunk of request) {
+      for await (const chunk of request.iterator({ destroyOnReturn: false })) {
+        if (bytesWritten + chunk.length > MAX_UPLOAD_BYTES) {
+          throw new HttpError(413, '单个文件不能超过 20 MB', 'FILE_TOO_LARGE');
+        }
         await writeAll(handle, chunk);
         bytesWritten += chunk.length;
         hash.update(chunk);
@@ -338,4 +342,4 @@ function isFileRecord(record) {
   );
 }
 
-module.exports = { FILE_ID_PATTERN, FileStore };
+module.exports = { FILE_ID_PATTERN, MAX_UPLOAD_BYTES, FileStore };

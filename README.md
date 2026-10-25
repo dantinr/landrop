@@ -30,6 +30,8 @@ http://192.168.0.10:8787
 
 ## 文件位置
 
+单个上传文件不超过 **20 MB**（`20 × 1024 × 1024` 字节），恰好达到上限可以上传。桌面文件选择、拖拽和手机图片上传使用相同限制；多个文件按各自大小判断。超限文件会提示原因，服务端也会按实际收到的字节数校验，并清理未完成的临时文件。已有文件仍可正常下载。
+
 - 上传文件：`data/uploads/`（物理文件名为 `原文件名[IP].扩展名`）
 - 上传中的临时文件：`data/incoming/`
 - 文件索引：`data/files.json`
@@ -49,7 +51,7 @@ npm start -- --port=9000
 
 `chat.local.conf` 用于本地 `chat.local`；`icloud.aicsi.cn.conf` 是云端域名的独立站点配置，保存在服务器 `/var/www/landrop/icloud.aicsi.cn.conf`，由 `/etc/nginx/conf.d/icloud.aicsi.cn.conf` 符号链接加载。
 
-云端配置将 HTTP 自动跳转到 HTTPS，反向代理到服务器本机 `127.0.0.1:8787`，支持 WebSocket 聊天和流式上传下载，不限制上传大小。需要先启动 LanDrop 后端，并为 `icloud.aicsi.cn` 签发证书，证书路径为 `/etc/letsencrypt/live/icloud.aicsi.cn/`。HTTP 的 `/.well-known/acme-challenge/` 目录映射到 `/var/www/letsencrypt`，供 Certbot webroot 验证和续期使用。
+云端配置将 HTTP 自动跳转到 HTTPS，反向代理到服务器本机 `127.0.0.1:8787`，支持 WebSocket 聊天和流式上传下载，上传上限为单个文件 20 MB。需要先启动 LanDrop 后端，并为 `icloud.aicsi.cn` 签发证书，证书路径为 `/etc/letsencrypt/live/icloud.aicsi.cn/`。HTTP 的 `/.well-known/acme-challenge/` 目录映射到 `/var/www/letsencrypt`，供 Certbot webroot 验证和续期使用。
 
 云端站点通过 `X-Robots-Tag: noindex, nofollow, noarchive` 响应头和禁止抓取所有路径的 `/robots.txt` 告知搜索引擎不要索引。
 

@@ -9,7 +9,7 @@ const crypto = require('node:crypto');
 const { WebSocketServer, WebSocket } = require('ws');
 const { ChatStore } = require('./chat-store');
 const { remoteAddress } = require('./client-ip');
-const { FileStore, FILE_ID_PATTERN } = require('./file-store');
+const { FileStore, FILE_ID_PATTERN, MAX_UPLOAD_BYTES } = require('./file-store');
 const {
   HttpError,
   contentDisposition,
@@ -71,6 +71,7 @@ async function createLanDropServer(options = {}) {
         return sendJson(response, 200, {
           serverName,
           onlineCount: readyClients(clients).length,
+          maxUploadBytes: MAX_UPLOAD_BYTES,
           availableBytes: await fileStore.availableBytes(),
         });
       }
@@ -88,6 +89,12 @@ async function createLanDropServer(options = {}) {
           singleHeader(request.headers['content-length']),
           singleHeader(request.headers['x-file-size']),
         );
+        if (
+          Number(singleHeader(request.headers['content-length'])) > MAX_UPLOAD_BYTES
+          || Number(singleHeader(request.headers['x-file-size'])) > MAX_UPLOAD_BYTES
+        ) {
+          throw new HttpError(413, '单个文件不能超过 20 MB', 'FILE_TOO_LARGE');
+        }
         if (activeUploads.has(uploadId)) {
           throw new HttpError(409, '上传任务编号重复', 'DUPLICATE_UPLOAD_ID');
         }
@@ -155,6 +162,9 @@ async function createLanDropServer(options = {}) {
 
       throw new HttpError(404, '页面不存在', 'NOT_FOUND');
     } catch (error) {
+      if (error instanceof HttpError && error.status === 413) {
+        response.setHeader('Connection', 'close');
+      }
       handleHttpError(error, response);
     }
   });

@@ -1,5 +1,7 @@
 'use strict';
 
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+
 const elements = {
   connectionState: document.querySelector('#connection-state'),
   connectionLabel: document.querySelector('#connection-label'),
@@ -579,7 +581,13 @@ function uploadFiles(fileList) {
     showToast('聊天室连接后才能上传文件', true);
     return;
   }
-  for (const file of files) startUpload(file);
+  for (const file of files) {
+    if (file.size > MAX_UPLOAD_BYTES) {
+      showToast(`${file.name}：单个文件不能超过 20 MB`, true);
+      continue;
+    }
+    startUpload(file);
+  }
 }
 
 function startUpload(file) {
@@ -615,7 +623,7 @@ function startUpload(file) {
     if (xhr.status >= 200 && xhr.status < 300) {
       finishUpload(upload, 'done', '上传完成');
     } else {
-      let message = '上传失败';
+      let message = xhr.status === 413 ? '单个文件不能超过 20 MB' : '上传失败';
       try { message = JSON.parse(xhr.responseText).message || message; } catch {}
       finishUpload(upload, 'failed', message);
     }
