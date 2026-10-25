@@ -13,6 +13,7 @@
 
 - `server.js`：命令行入口，读取端口和数据目录，启动及停止服务。
 - `src/app.js`：HTTP、WebSocket、静态资源白名单、安全响应头和局域网地址发现。
+- `src/client-ip.js`：客户端 IP 规范化及本机可信反向代理标头解析。
 - `src/validation.js`：用户输入、文件名、MIME 类型和下载范围校验。
 - `src/json-store.js`：JSON 数据的排队与原子写入。
 - `src/file-store.js`：文件流式写入、索引、临时文件清理和空间查询。
@@ -41,6 +42,13 @@ npm test
 ```
 
 可用 `npm start -- --port=9000` 改端口；默认监听 `0.0.0.0:8787`。测试必须使用临时数据目录，不要读取、覆盖或依赖仓库根目录的 `data/`。
+
+## 云端部署约定
+
+- 服务器项目集中放在 `/var/www/landrop`，保持与本地相同的目录结构；上传文件、索引和聊天记录保存在项目内 `data/`，更新程序时必须保留数据。
+- 云端进程以 `landrop` 用户运行，仅监听 `127.0.0.1:8787`；`data/` 归该用户所有，systemd 的可写路径与此目录一致。
+- 云端通过 `LANDROP_TRUST_PROXY=loopback` 信任本机 Nginx 的 `X-Real-IP`；默认直连模式忽略代理标头，不信任非回环来源或非法 IP。
+- systemd 和 Nginx 的配置源文件保存在项目内，通过 `/etc/systemd/system/landrop.service` 和 `/etc/nginx/conf.d/icloud.aicsi.cn.conf` 符号链接加载。
 
 ## 验证要求
 

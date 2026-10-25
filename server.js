@@ -25,6 +25,7 @@ async function main() {
     port,
     host: process.env.HOST || '0.0.0.0',
     dataDir,
+    trustLoopbackProxy: process.env.LANDROP_TRUST_PROXY === 'loopback',
   });
 
   await app.start();

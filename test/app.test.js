@@ -186,6 +186,57 @@ test('设备上线时广播提示，改名和同设备多标签页不重复，�
   assert.deepEqual(stored.map((message) => message.kind), ['text', 'text']);
 });
 
+for (const trustLoopbackProxy of [false, true]) {
+  test(`代理 IP ${trustLoopbackProxy ? '启用' : '禁用'}时，聊天、在线成员、上传和持久化使用正确地址`, async (context) => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-proxy-test-'));
+    const app = await createLanDropServer({ host: '127.0.0.1', port: 0, dataDir, trustLoopbackProxy });
+    const address = await app.start();
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const sockets = [];
+    context.after(async () => {
+      for (const socket of sockets) socket.terminate();
+      await app.stop();
+      await fs.rm(dataDir, { recursive: true, force: true });
+    });
+
+    const chatIp = trustLoopbackProxy ? '203.0.113.42' : '127.0.0.1';
+    const uploadIp = trustLoopbackProxy ? '203.0.113.43' : '127.0.0.1';
+    const client = await connectClient(baseUrl, '代理访问者', 'device-proxy-test', {
+      'X-Real-IP': '203.0.113.42',
+      'X-Forwarded-For': '198.51.100.99',
+    });
+    sockets.push(client.socket);
+    const presence = await client.inbox.waitFor((event) => event.type === 'presence');
+    assert.equal(presence.users.find((user) => user.id === client.clientId).ip, chatIp);
+    const online = await client.inbox.waitFor((event) => event.message?.kind === 'online');
+    assert.equal(online.message.sender.ip, chatIp);
+    client.socket.send(JSON.stringify({ type: 'chat', text: '代理地址检查' }));
+    const chat = await client.inbox.waitFor((event) => event.message?.kind === 'text');
+    assert.equal(chat.message.sender.ip, chatIp);
+
+    const payload = Buffer.from('proxy upload');
+    const upload = await fetch(`${baseUrl}/api/files`, {
+      method: 'POST',
+      headers: {
+        Origin: baseUrl,
+        'X-File-Name': Buffer.from('代理上传.txt').toString('base64url'),
+        'X-File-Type': 'text/plain',
+        'X-Real-IP': '203.0.113.43',
+        'X-Forwarded-For': '198.51.100.99',
+      },
+      body: payload,
+    });
+    assert.equal(upload.status, 201);
+    const result = await upload.json();
+    assert.equal(result.file.sender.ip, uploadIp);
+    const notice = await client.inbox.waitFor((event) => event.message?.kind === 'file');
+    assert.equal(notice.message.sender.ip, uploadIp);
+    assert.deepEqual(await fs.readFile(path.join(dataDir, 'uploads', `代理上传[${uploadIp}].txt`)), payload);
+    const stored = JSON.parse(await fs.readFile(path.join(dataDir, 'messages.json'), 'utf8'));
+    assert.deepEqual(stored.map((message) => message.sender.ip), [chatIp, uploadIp]);
+  });
+}
+
 test('文件名和下载范围校验', () => {
   assert.equal(decodeFileName(Buffer.from('照片 01.jpg').toString('base64url')), '照片 01.jpg');
   assert.deepEqual(parseByteRange('bytes=2-5', 10), { start: 2, end: 5 });
@@ -532,12 +583,12 @@ test('VERSION 与 npm 元数据遵循版本约定', async () => {
   assert.equal(packageLock.packages[''].version, version);
 });
 
-function connectClient(baseUrl, name, deviceId = `device-${Date.now()}-${Math.random()}`) {
+function connectClient(baseUrl, name, deviceId = `device-${Date.now()}-${Math.random()}`, headers = {}) {
   return new Promise((resolve, reject) => {
     const socketUrl = new URL('/ws', baseUrl);
     socketUrl.protocol = 'ws:';
     socketUrl.searchParams.set('deviceId', deviceId);
-    const socket = new WebSocket(socketUrl, { origin: baseUrl });
+    const socket = new WebSocket(socketUrl, { origin: baseUrl, headers });
     const inbox = createInbox(socket);
     const timeout = setTimeout(() => reject(new Error('WebSocket connection timed out')), 3_000);
 

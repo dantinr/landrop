@@ -45,6 +45,26 @@ npm start -- --port=9000
 
 这个版本没有账号、口令和权限控制，请仅在可信的家庭局域网中运行。停止终端中的服务后，页面也会停止访问。
 
+## Nginx 反向代理
+
+`chat.local.conf` 用于本地 `chat.local`；`icloud.aicsi.cn.conf` 是云端域名的独立站点配置，保存在服务器 `/var/www/landrop/icloud.aicsi.cn.conf`，由 `/etc/nginx/conf.d/icloud.aicsi.cn.conf` 符号链接加载。
+
+云端配置将 HTTP 自动跳转到 HTTPS，反向代理到服务器本机 `127.0.0.1:8787`，支持 WebSocket 聊天和流式上传下载，不限制上传大小。需要先启动 LanDrop 后端，并为 `icloud.aicsi.cn` 签发证书，证书路径为 `/etc/letsencrypt/live/icloud.aicsi.cn/`。HTTP 的 `/.well-known/acme-challenge/` 目录映射到 `/var/www/letsencrypt`，供 Certbot webroot 验证和续期使用。
+
+云端站点通过 `X-Robots-Tag: noindex, nofollow, noarchive` 响应头和禁止抓取所有路径的 `/robots.txt` 告知搜索引擎不要索引。
+
+修改配置后，运行 `nginx -t` 验证，再运行 `nginx -s reload` 平滑加载。当前配置使用 `http2 on`，需要 Nginx 1.25.1 或更高版本。
+
+云端服务通过 `LANDROP_TRUST_PROXY=loopback` 读取本机 Nginx 覆盖设置的 `X-Real-IP`，聊天、在线成员及上传文件名使用同一套 IP 解析规则。默认直连模式忽略代理标头；启用后仍只接受来自回环地址的代理，并校验 IP 格式。公网访问显示访问者的公网出口 IP，同一网络下的设备可能显示相同地址；历史记录中的 IP 保留原值。
+
+## Linux 云端服务
+
+`deploy/landrop.service` 用于 systemd 后台运行和开机启动：程序集中放在 `/var/www/landrop`，目录结构与本地一致，以 `landrop` 系统用户运行，仅监听 `127.0.0.1:8787`，由 Nginx 提供外部访问。服务器需安装 Node.js 20 或更高版本，并准备好生产依赖。
+
+上传文件和聊天记录统一保存在项目内的 `data/`：上传文件为 `/var/www/landrop/data/uploads/`，文件索引和聊天记录分别为 `data/files.json`、`data/messages.json`。`data/` 及其内容归 `landrop` 用户所有，更新程序时保留该目录。
+
+`/etc/systemd/system/landrop.service` 符号链接到项目内的 `/var/www/landrop/deploy/landrop.service`。创建链接后，执行 `systemctl daemon-reload` 和 `systemctl enable --now landrop`；使用 `systemctl status landrop` 查看状态，`journalctl -u landrop -f` 查看日志。
+
 ## 版本与许可
 
 当前版本以 [VERSION](VERSION) 为准，并同步记录在 npm 包元数据中。版本格式为 `x.x.xx`，末段从 `10` 开始、到 `99` 后向前进位并重置为 `10`，例如 `0.0.99` 的下一版本是 `0.1.10`。

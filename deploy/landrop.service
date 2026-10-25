@@ -1,0 +1,25 @@
+[Unit]
+Description=LanDrop chat and file sharing
+After=network.target
+
+[Service]
+Type=simple
+User=landrop
+Group=landrop
+WorkingDirectory=/var/www/landrop
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=8787
+Environment=LANDROP_TRUST_PROXY=loopback
+ExecStart=/usr/bin/node /var/www/landrop/server.js
+Restart=on-failure
+RestartSec=3
+UMask=0027
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/www/landrop/data
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

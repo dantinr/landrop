@@ -8,6 +8,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { WebSocketServer, WebSocket } = require('ws');
 const { ChatStore } = require('./chat-store');
+const { remoteAddress } = require('./client-ip');
 const { FileStore, FILE_ID_PATTERN } = require('./file-store');
 const {
   HttpError,
@@ -34,6 +35,7 @@ async function createLanDropServer(options = {}) {
   const dataDir = path.resolve(options.dataDir || path.join(process.cwd(), 'data'));
   const publicDir = path.resolve(options.publicDir || path.join(__dirname, '..', 'wwwroot'));
   const serverName = options.serverName || os.hostname();
+  const trustLoopbackProxy = options.trustLoopbackProxy === true;
   const fileStore = new FileStore(dataDir);
   const chatStore = new ChatStore(dataDir);
   await Promise.all([fileStore.init(), chatStore.init()]);
@@ -96,7 +98,7 @@ async function createLanDropServer(options = {}) {
           : {
               id: typeof claimedClientId === 'string' ? claimedClientId.slice(0, 80) : crypto.randomUUID(),
               name: normalizeUserName(singleHeader(request.headers['x-client-name'])),
-              ip: remoteAddress(request),
+              ip: remoteAddress(request, trustLoopbackProxy),
             };
         const activeUpload = {
           id: uploadId,
@@ -180,7 +182,7 @@ async function createLanDropServer(options = {}) {
     const client = {
       id: normalizeDeviceId(requestUrl.searchParams.get('deviceId')),
       name: '访客',
-      ip: remoteAddress(request),
+      ip: remoteAddress(request, trustLoopbackProxy),
       ready: false,
       isAlive: true,
       webSocket,
@@ -313,14 +315,6 @@ async function createLanDropServer(options = {}) {
 
 function publicSender(client) {
   return { id: client.id, name: client.name, ip: client.ip };
-}
-
-function remoteAddress(request) {
-  let address = request.socket?.remoteAddress || '';
-  if (address.startsWith('::ffff:')) address = address.slice(7);
-  if (address === '::1') return '127.0.0.1';
-  const scopeIndex = address.indexOf('%');
-  return scopeIndex === -1 ? address : address.slice(0, scopeIndex);
 }
 
 function normalizeDeviceId(value) {
