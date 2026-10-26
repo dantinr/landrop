@@ -761,6 +761,10 @@ textarea:focus-visible,
   font-size: 12px;
 }
 
+.files-empty[hidden] {
+  display: none;
+}
+
 .recent-file {
   display: grid;
   grid-template-columns: 36px minmax(0, 1fr) 34px;
@@ -773,6 +777,117 @@ textarea:focus-visible,
 .recent-file-icon {
   width: 36px;
   height: 36px;
+}
+
+.chat-heading > div:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.room-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 2px;
+  flex: 0 0 auto;
+  max-width: 220px;
+}
+
+.room-actions [hidden] {
+  display: none;
+}
+
+.room-actions a {
+  display: inline-grid;
+  place-items: center;
+}
+
+.danger-button {
+  color: #b13e36;
+}
+
+.room-form {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+}
+
+.room-form label {
+  display: grid;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.room-form input {
+  width: 100%;
+  min-width: 0;
+  height: 42px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 16px;
+  color: var(--text);
+  background: var(--surface);
+}
+
+.room-hint,
+.room-form-error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
+.room-form-error {
+  color: #b13e36;
+}
+
+.room-form-error:empty {
+  display: none;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.dialog-actions a {
+  text-decoration: none;
+}
+
+.primary-button {
+  min-height: 40px;
+  padding: 9px 16px;
+  border: 1px solid #16755b;
+  border-radius: 6px;
+  color: white;
+  background: #16755b;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.primary-button:hover {
+  background: #105c47;
+}
+
+.primary-button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.destructive-button {
+  background: #b13e36;
+  border-color: #b13e36;
+}
+
+.destructive-button:hover {
+  background: #94312b;
 }
 
 .people-dialog {
@@ -904,6 +1019,10 @@ textarea:focus-visible,
 }
 
 @media (max-width: 900px) {
+  .room-actions {
+    max-width: 150px;
+  }
+
   html,
   body {
     min-width: 0;

@@ -47,12 +47,17 @@
             <div>
               <h2 id="chat-title">聊天</h2>
               <p id="server-name">公共房间</p>
+              <p id="room-status" hidden></p>
               <p id="chat-quota" aria-live="polite"></p>
               <p id="history-policy">仅保留最近 20 条聊天记录</p>
             </div>
-            <button class="icon-button" id="clear-view" type="button" title="清空当前显示" aria-label="清空当前显示">
-              <i data-lucide="eraser" aria-hidden="true"></i>
-            </button>
+            <div class="room-actions">
+              <button class="icon-button" id="create-room" type="button" title="创建聊天室" aria-label="创建聊天室"><i data-lucide="circle-plus" aria-hidden="true"></i></button>
+              <button class="icon-button" id="invite-room" type="button" title="复制邀请链接" aria-label="复制邀请链接" hidden><i data-lucide="link" aria-hidden="true"></i></button>
+              <a class="icon-button" id="public-room" href="/" title="返回公共房间" aria-label="返回公共房间" hidden><i data-lucide="house" aria-hidden="true"></i></a>
+              <button class="icon-button danger-button" id="destroy-room" type="button" title="销毁聊天室" aria-label="销毁聊天室" hidden><i data-lucide="trash-2" aria-hidden="true"></i></button>
+              <button class="icon-button" id="clear-view" type="button" title="清空当前显示" aria-label="清空当前显示"><i data-lucide="eraser" aria-hidden="true"></i></button>
+            </div>
           </div>
 
           <div class="messages" id="messages" aria-live="polite" aria-label="聊天消息">
@@ -131,6 +136,45 @@
         </aside>
       </main>
     </div>
+
+    <dialog class="people-dialog room-dialog" id="create-room-dialog" aria-labelledby="create-room-title">
+      <div class="dialog-heading">
+        <h2 id="create-room-title">创建聊天室</h2>
+        <button class="icon-button" id="close-create-room" type="button" aria-label="关闭创建窗口"><i data-lucide="x" aria-hidden="true"></i></button>
+      </div>
+      <form class="room-form" id="create-room-form">
+        <label>聊天室名称<input id="room-name" name="roomName" type="text" maxlength="40" placeholder="例如：周末小聚" required autofocus></label>
+        <label>人数上限<input id="room-capacity" name="capacity" type="number" min="1" step="1" value="10" required></label>
+        <p class="room-hint">人数包含房主，同一设备的多个标签页占一个名额。创建后可复制专有邀请链接。</p>
+        <p class="room-hint">请在创建房间的浏览器中管理房间；房主可随时销毁房间及其中的记录和文件。</p>
+        <p class="room-form-error" id="room-form-error" role="alert"></p>
+        <button class="primary-button" id="submit-create-room" type="submit">创建并进入</button>
+      </form>
+    </dialog>
+
+    <dialog class="people-dialog room-dialog" id="destroy-room-dialog" aria-labelledby="destroy-room-title">
+      <div class="dialog-heading"><h2 id="destroy-room-title">销毁聊天室？</h2></div>
+      <div class="room-form">
+        <p class="room-hint">所有成员将断开连接，聊天记录和上传文件会被删除，邀请链接也将失效。此操作无法撤销。</p>
+        <p class="room-form-error" id="destroy-room-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="secondary-button" id="cancel-destroy-room" type="button">取消</button>
+          <button class="primary-button destructive-button" id="confirm-destroy-room" type="button">确认销毁</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="people-dialog room-dialog" id="room-unavailable-dialog" aria-labelledby="room-unavailable-title">
+      <div class="dialog-heading"><h2 id="room-unavailable-title">暂时无法进入</h2></div>
+      <div class="room-form">
+        <p class="room-hint" id="room-unavailable-message"></p>
+        <div class="dialog-actions">
+          <a class="secondary-button" href="/">返回公共房间</a>
+          <button class="primary-button destructive-button" id="destroy-full-room" type="button" hidden>销毁聊天室</button>
+          <button class="primary-button" id="retry-room" type="button">重试进入</button>
+        </div>
+      </div>
+    </dialog>
 
     <dialog class="people-dialog" id="people-dialog">
       <div class="dialog-heading">

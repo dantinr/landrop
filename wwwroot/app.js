@@ -10,6 +10,7 @@ const elements = {
   nameInput: document.querySelector('#name-input'),
   copyAddress: document.querySelector('#copy-address'),
   serverName: document.querySelector('#server-name'),
+  roomStatus: document.querySelector('#room-status'),
   chatQuota: document.querySelector('#chat-quota'),
   historyPolicy: document.querySelector('#history-policy'),
   clearView: document.querySelector('#clear-view'),
@@ -40,6 +41,25 @@ const elements = {
   peopleList: document.querySelector('#people-list'),
   closePeople: document.querySelector('#close-people'),
   toastRegion: document.querySelector('#toast-region'),
+  createRoom: document.querySelector('#create-room'),
+  createRoomDialog: document.querySelector('#create-room-dialog'),
+  closeCreateRoom: document.querySelector('#close-create-room'),
+  createRoomForm: document.querySelector('#create-room-form'),
+  roomName: document.querySelector('#room-name'),
+  roomCapacity: document.querySelector('#room-capacity'),
+  roomFormError: document.querySelector('#room-form-error'),
+  submitCreateRoom: document.querySelector('#submit-create-room'),
+  inviteRoom: document.querySelector('#invite-room'),
+  publicRoom: document.querySelector('#public-room'),
+  destroyRoom: document.querySelector('#destroy-room'),
+  destroyRoomDialog: document.querySelector('#destroy-room-dialog'),
+  cancelDestroyRoom: document.querySelector('#cancel-destroy-room'),
+  confirmDestroyRoom: document.querySelector('#confirm-destroy-room'),
+  destroyRoomError: document.querySelector('#destroy-room-error'),
+  unavailableDialog: document.querySelector('#room-unavailable-dialog'),
+  unavailableMessage: document.querySelector('#room-unavailable-message'),
+  retryRoom: document.querySelector('#retry-room'),
+  destroyFullRoom: document.querySelector('#destroy-full-room'),
 };
 
 const state = {
@@ -61,6 +81,11 @@ const state = {
   typingUsers: new Map(),
   uploads: new Map(),
   networkUploads: new Map(),
+  roomId: new URLSearchParams(location.search).get('room') || '',
+  room: null,
+  roomSession: null,
+  roomUnavailable: false,
+  isOwner: false,
 };
 
 const mobileChatMedia = window.matchMedia('(max-width: 900px)');
@@ -72,11 +97,35 @@ function init() {
   bindEvents();
   updateResponsiveLayout();
   refreshIcons();
+  elements.inviteRoom.hidden = !state.roomId;
+  elements.publicRoom.hidden = !state.roomId;
   connectSocket();
   refreshStatus();
 }
 
 function bindEvents() {
+  elements.createRoom.addEventListener('click', () => {
+    elements.roomFormError.textContent = '';
+    elements.createRoomDialog.showModal();
+  });
+  elements.closeCreateRoom.addEventListener('click', () => elements.createRoomDialog.close());
+  elements.createRoomForm.addEventListener('submit', createRoom);
+  elements.inviteRoom.addEventListener('click', copyCurrentAddress);
+  elements.destroyRoom.addEventListener('click', () => {
+    elements.destroyRoomError.textContent = '';
+    elements.destroyRoomDialog.showModal();
+  });
+  elements.cancelDestroyRoom.addEventListener('click', () => elements.destroyRoomDialog.close());
+  elements.destroyFullRoom.addEventListener('click', () => {
+    elements.destroyRoomError.textContent = '';
+    elements.destroyRoomDialog.showModal();
+  });
+  elements.confirmDestroyRoom.addEventListener('click', destroyRoom);
+  elements.retryRoom.addEventListener('click', () => {
+    elements.unavailableDialog.close();
+    state.roomUnavailable = false;
+    connectSocket();
+  });
   elements.messageForm.addEventListener('submit', sendMessage);
   elements.messageInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -153,7 +202,7 @@ function connectSocket() {
 
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const socket = new WebSocket(
-    `${protocol}//${location.host}/ws?deviceId=${encodeURIComponent(state.deviceId)}`,
+    `${protocol}//${location.host}/ws?deviceId=${encodeURIComponent(state.deviceId)}&room=${encodeURIComponent(state.roomId)}`,
   );
   state.socket = socket;
 
@@ -177,8 +226,10 @@ function connectSocket() {
     if (socket !== state.socket) return;
     state.connected = false;
     state.clientId = null;
+    state.roomSession = null;
     state.networkUploads.clear();
     renderNetworkUploads();
+    if (state.roomUnavailable) return;
     setConnectionState('reconnecting', '连接已断开');
     state.reconnectTimer = setTimeout(connectSocket, state.reconnectDelay);
     state.reconnectDelay = Math.min(state.reconnectDelay * 1.7, 8_000);
@@ -190,26 +241,46 @@ function connectSocket() {
 }
 
 function handleSocketPayload(payload) {
+  if (state.roomUnavailable && payload.type !== 'welcome') return;
   if (payload.type === 'welcome') {
     state.clientId = payload.clientId;
     state.connected = true;
     state.reconnectDelay = 800;
+    state.roomSession = payload.roomSession;
+    state.room = payload.room;
+    state.roomUnavailable = false;
+    elements.unavailableDialog.close();
     state.chatHistoryLimit = Number.isSafeInteger(payload.chatHistoryLimit) && payload.chatHistoryLimit > 0
       ? payload.chatHistoryLimit : 20;
     elements.historyPolicy.textContent = `仅保留最近 ${state.chatHistoryLimit} 条聊天记录`;
     updateChatQuota(payload.chatQuota);
-    elements.serverName.textContent = `${payload.serverName || '局域网'} · 公共房间`;
+    renderRoom(payload.serverName);
     renderHistory(payload.history || []);
     replaceFiles(payload.files || []);
     replaceNetworkUploads(payload.uploads || []);
-    sendSocket({ type: 'join', name: currentName() });
+    sendSocket({ type: 'join', name: currentName(), ownerToken: loadOwnerToken() });
     setConnectionState('connected', '已连接');
+    refreshStatus();
+    return;
+  }
+
+  if (payload.type === 'room') {
+    state.room = payload.room;
+    state.isOwner = payload.isOwner;
+    elements.destroyRoom.hidden = !state.isOwner;
+    renderRoom();
+    return;
+  }
+
+  if (payload.type === 'roomDestroyed') {
+    roomUnavailable('聊天室已被房主销毁，记录和文件已清除，邀请链接已失效。', false);
     return;
   }
 
   if (payload.type === 'presence') {
     state.users = Array.isArray(payload.users) ? payload.users : [];
     renderPresence();
+    renderRoom();
     return;
   }
 
@@ -234,6 +305,10 @@ function handleSocketPayload(payload) {
   }
 
   if (payload.type === 'error') {
+    if (['ROOM_FULL', 'ROOM_NOT_FOUND'].includes(payload.code)) {
+      roomUnavailable(payload.message, payload.code === 'ROOM_FULL');
+      return;
+    }
     if (payload.chatQuota) updateChatQuota(payload.chatQuota);
     if (['DAILY_MESSAGE_LIMIT', 'DAILY_CHAT_LIMIT'].includes(payload.code)
       && !elements.messageInput.value && payload.text) {
@@ -304,7 +379,7 @@ function commitName() {
   const name = currentName();
   elements.nameInput.value = name;
   localStorage.setItem('landrop-name', name);
-  if (state.connected) sendSocket({ type: 'join', name });
+  if (state.connected) sendSocket({ type: 'join', name, ownerToken: loadOwnerToken() });
 }
 
 function sendMessage(event) {
@@ -493,7 +568,9 @@ function createFileMessage(file) {
 function createDownloadButton(file) {
   const link = document.createElement('a');
   link.className = 'download-button';
-  link.href = file.downloadUrl;
+  const downloadUrl = new URL(file.downloadUrl, location.origin);
+  if (state.roomId && state.roomSession) downloadUrl.searchParams.set('session', state.roomSession);
+  link.href = downloadUrl.href;
   link.download = file.name;
   link.title = `下载 ${file.name}`;
   link.setAttribute('aria-label', `下载 ${file.name}`);
@@ -577,9 +654,10 @@ function renderFiles() {
 async function refreshFiles() {
   elements.refreshFiles.firstElementChild?.classList.add('spinning');
   try {
-    const response = await fetch('/api/files', { cache: 'no-store' });
+    const response = await fetch(roomApi('/files'), { cache: 'no-store', headers: roomHeaders() });
     if (!response.ok) throw new Error('刷新失败');
     const payload = await response.json();
+    if (state.roomUnavailable) return;
     replaceFiles(payload.files || []);
   } catch {
     showToast('文件列表刷新失败', true);
@@ -589,11 +667,13 @@ async function refreshFiles() {
 }
 
 async function refreshStatus() {
+  if (state.roomId && !state.roomSession) return;
   try {
-    const response = await fetch('/api/status', { cache: 'no-store' });
+    const response = await fetch(roomApi('/status'), { cache: 'no-store', headers: roomHeaders() });
     if (!response.ok) return;
     const status = await response.json();
-    if (status.serverName) elements.serverName.textContent = `${status.serverName} · 公共房间`;
+    if (state.roomUnavailable) return;
+    renderRoom(status.serverName);
     elements.storageLabel.textContent = Number.isFinite(status.availableBytes)
       ? `可用 ${formatBytes(status.availableBytes)}`
       : '';
@@ -674,7 +754,8 @@ function startUpload(file) {
   refreshIcons();
 
   const xhr = upload.xhr;
-  xhr.open('POST', '/api/files');
+  xhr.open('POST', roomApi('/files'));
+  if (state.roomId) xhr.setRequestHeader('X-Room-Session', state.roomSession);
   xhr.setRequestHeader('Content-Type', 'application/octet-stream');
   xhr.setRequestHeader('X-File-Name', encodeBase64Url(file.name));
   xhr.setRequestHeader('X-File-Type', file.type || 'application/octet-stream');
@@ -950,20 +1031,127 @@ function openPeopleDialog() {
 }
 
 async function copyCurrentAddress() {
+  const address = new URL(state.roomId ? `/?room=${encodeURIComponent(state.roomId)}` : '/', location.origin).href;
   try {
-    await navigator.clipboard.writeText(location.href);
-    showToast('地址已复制');
+    await navigator.clipboard.writeText(address);
+    showToast(state.roomId ? '邀请链接已复制' : '地址已复制');
   } catch {
     const input = document.createElement('input');
-    input.value = location.href;
+    input.value = address;
     input.style.position = 'fixed';
     input.style.opacity = '0';
     document.body.append(input);
     input.select();
     document.execCommand('copy');
     input.remove();
-    showToast('地址已复制');
+    showToast(state.roomId ? '邀请链接已复制' : '地址已复制');
   }
+}
+
+function roomApi(suffix) {
+  return `${state.roomId ? `/api/rooms/${encodeURIComponent(state.roomId)}` : '/api'}${suffix}`;
+}
+
+function roomHeaders() {
+  return state.roomId ? { 'X-Room-Session': state.roomSession || '' } : {};
+}
+
+function loadOwnerToken() {
+  try {
+    return localStorage.getItem(`landrop-owner-${state.roomId}`) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function renderRoom(serverName) {
+  if (serverName) state.serverName = serverName;
+  const room = state.room;
+  elements.serverName.textContent = `${state.serverName || '局域网'} · ${room?.name || (state.roomId ? '专有聊天室' : '公共房间')}`;
+  elements.serverName.title = elements.serverName.textContent;
+  elements.roomStatus.hidden = !room?.capacity;
+  elements.roomStatus.textContent = room?.capacity ? `${state.users.length} / ${room.capacity} 人${state.isOwner ? ' · 房主' : ''}` : '';
+  document.title = room?.id ? `${room.name} · 邻传` : '邻传';
+}
+
+async function createRoom(event) {
+  event.preventDefault();
+  elements.submitCreateRoom.disabled = true;
+  elements.roomFormError.textContent = '';
+  try {
+    // Check persistence before creating a room so the owner credential survives navigation.
+    localStorage.setItem('landrop-storage-check', '1');
+    localStorage.removeItem('landrop-storage-check');
+    const response = await fetch('/api/rooms', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: elements.roomName.value.trim(), capacity: Number(elements.roomCapacity.value) }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || '创建失败');
+    localStorage.setItem(`landrop-owner-${result.room.id}`, result.ownerToken);
+    location.assign(result.room.invitePath);
+  } catch (error) {
+    elements.roomFormError.textContent = error.message || '创建失败，请检查浏览器是否允许本地存储';
+  } finally {
+    elements.submitCreateRoom.disabled = false;
+  }
+}
+
+async function destroyRoom() {
+  elements.confirmDestroyRoom.disabled = true;
+  elements.destroyRoomError.textContent = '';
+  try {
+    const response = await fetch(roomApi(''), {
+      method: 'DELETE', headers: { Authorization: `Bearer ${loadOwnerToken() || ''}` },
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || '销毁失败');
+    elements.destroyRoomDialog.close();
+    roomUnavailable('聊天室已销毁，记录和文件已清除，邀请链接已失效。', false);
+    try { localStorage.removeItem(`landrop-owner-${state.roomId}`); } catch {}
+  } catch (error) {
+    elements.destroyRoomError.textContent = error.message || '销毁失败，请重试';
+  } finally {
+    elements.confirmDestroyRoom.disabled = false;
+  }
+}
+
+function roomUnavailable(message, canRetry) {
+  state.roomUnavailable = true;
+  state.connected = false;
+  state.roomSession = null;
+  state.isOwner = false;
+  clearTimeout(state.reconnectTimer);
+  clearTimeout(state.quotaTimer);
+  state.socket?.close();
+  for (const upload of state.uploads.values()) {
+    if (upload.status === 'uploading') upload.xhr.abort();
+  }
+  state.uploads.clear();
+  elements.uploadList.replaceChildren();
+  renderHistory([]);
+  replaceFiles([]);
+  replaceNetworkUploads([]);
+  state.users = [];
+  renderPresence();
+  for (const user of state.typingUsers.values()) clearTimeout(user.timer);
+  state.typingUsers.clear();
+  elements.typingLine.textContent = '';
+  elements.destroyRoom.hidden = true;
+  setConnectionState('disconnected', canRetry ? '人数已满' : '房间已失效');
+  elements.destroyRoomDialog.close();
+  elements.unavailableMessage.textContent = message;
+  elements.retryRoom.hidden = !canRetry;
+  elements.destroyFullRoom.hidden = true;
+  if (canRetry && loadOwnerToken()) verifyRoomOwner();
+  if (!elements.unavailableDialog.open) elements.unavailableDialog.showModal();
+}
+
+async function verifyRoomOwner() {
+  try {
+    const response = await fetch(roomApi(''), { headers: { Authorization: `Bearer ${loadOwnerToken()}` }, cache: 'no-store' });
+    if (response.ok && state.roomUnavailable && !elements.retryRoom.hidden) elements.destroyFullRoom.hidden = false;
+  } catch {}
 }
 
 function showToast(message, isError = false) {

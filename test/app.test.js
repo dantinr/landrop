@@ -877,20 +877,248 @@ test('自定义保留条数包含文字、文件及图片，并发发送按顺�
   }
 });
 
-function connectClient(baseUrl, name, deviceId = `device-${Date.now()}-${Math.random()}`, headers = {}) {
+test('专有聊天室隔离消息、成员、输入状态、上传和下载，房主凭证不会随邀请泄露', async (context) => {
+  const fixture = await roomFixture(context);
+  const { baseUrl, sockets } = fixture;
+  const created = await createTestRoom(baseUrl, '朋友的小屋', 3);
+  assert.equal(created.room.name, '朋友的小屋');
+  assert.equal(created.room.capacity, 3);
+  assert.equal(created.room.ownerHash, undefined);
+  assert.equal(created.room.invitePath, `/?room=${created.room.id}`);
+  assert.equal(created.room.invitePath.includes(created.ownerToken), false);
+  const otherRoom = await createTestRoom(baseUrl, '另一个房间', 2);
+  const publicClient = await connectClient(baseUrl, '公共成员', 'device-room-public');
+  const owner = await connectClient(baseUrl, '房主', 'device-room-owner', {}, { ...created.room, ownerToken: created.ownerToken });
+  const guest = await connectClient(baseUrl, '朋友', 'device-room-guest', {}, created.room);
+  const other = await connectClient(baseUrl, '邻居', 'device-room-other', {}, otherRoom.room);
+  sockets.push(publicClient.socket, owner.socket, guest.socket, other.socket);
+  assert.equal(owner.membership.isOwner, true);
+  assert.equal(guest.membership.isOwner, false);
+  assert.equal(guest.welcome.ownerToken, undefined);
+  const outsideEvents = [];
+  for (const client of [publicClient, other]) {
+    client.socket.on('message', (buffer) => outsideEvents.push(JSON.parse(buffer)));
+  }
+  owner.socket.send(JSON.stringify({ type: 'chat', text: '房间里的私聊' }));
+  await guest.inbox.waitFor((event) => event.message?.text === '房间里的私聊');
+  owner.socket.send(JSON.stringify({ type: 'typing', active: true }));
+  await guest.inbox.waitFor((event) => event.type === 'typing' && event.clientId === owner.clientId);
+  const headers = { 'X-Room-Session': owner.welcome.roomSession };
+  const prefix = `${baseUrl}/api/rooms/${created.room.id}`;
+  const response = await fetch(`${prefix}/files`, {
+    method: 'POST', headers: {
+      ...headers, Origin: baseUrl, 'X-File-Name': Buffer.from('房间图片.png').toString('base64url'),
+      'X-File-Type': 'image/png', 'X-Client-Id': other.clientId,
+    }, body: 'private image bytes',
+  });
+  assert.equal(response.status, 201);
+  const uploaded = await response.json();
+  assert.equal(uploaded.file.sender.id, owner.clientId, '不能伪造其他设备作为上传者');
+  assert.match(uploaded.file.downloadUrl, new RegExp(`/api/rooms/${created.room.id}/files/`));
+  await guest.inbox.waitFor((event) => event.message?.file?.id === uploaded.file.id);
+  const files = await (await fetch(`${prefix}/files`, { headers })).json();
+  assert.equal(files.files.length, 1);
+  for (const pathName of ['/files', '/status', `/files/${uploaded.file.id}/download`]) {
+    assert.equal((await fetch(`${prefix}${pathName}`)).status, 403);
+    assert.equal((await fetch(`${prefix}${pathName}`, { headers: { 'X-Room-Session': other.welcome.roomSession } })).status, 403);
+  }
+  const download = await fetch(`${baseUrl}${uploaded.file.downloadUrl}?session=${guest.welcome.roomSession}`, { headers: { Range: 'bytes=0-6' } });
+  assert.equal(download.status, 206);
+  assert.equal(await download.text(), 'private');
+  assert.equal((await fetch(`${baseUrl}/api/files/${uploaded.file.id}/download`)).status, 404);
+  assert.equal((await (await fetch(`${baseUrl}/api/files`)).json()).files.length, 0);
+  const wrongRoomDownload = `/api/rooms/${otherRoom.room.id}/files/${uploaded.file.id}/download`;
+  assert.equal((await fetch(`${baseUrl}${wrongRoomDownload}`, { headers: { 'X-Room-Session': other.welcome.roomSession } })).status, 404);
+  assert.equal(outsideEvents.some((event) => ['typing', 'uploads'].includes(event.type) || event.message?.sender?.id === owner.clientId), false);
+  const status = await (await fetch(`${prefix}/status`, { headers })).json();
+  assert.equal(status.onlineCount, 2);
+  assert.equal(status.room.capacity, 3);
+  assert.equal(status.room.ownerHash, undefined);
+  guest.socket.terminate();
+  await owner.inbox.waitFor((event) => event.type === 'presence' && event.count === 1);
+  assert.equal((await fetch(`${baseUrl}${uploaded.file.downloadUrl}?session=${guest.welcome.roomSession}`)).status, 403);
+});
+
+test('人数限制按设备原子预留，同设备多标签共用名额，退出后可加入且满员不泄露历史', async (context) => {
+  const { baseUrl, sockets } = await roomFixture(context);
+  const created = await createTestRoom(baseUrl, '两人房间', 2);
+  const owner = await connectClient(baseUrl, '房主', 'device-seats-owner', {}, created.room);
+  sockets.push(owner.socket);
+  owner.socket.send(JSON.stringify({ type: 'chat', text: '满员不可见的历史' }));
+  await owner.inbox.waitFor((event) => event.message?.text === '满员不可见的历史');
+  const attempts = await Promise.allSettled(['first', 'second'].map((suffix) => (
+    connectClient(baseUrl, suffix, `device-seats-${suffix}`, {}, created.room)
+  )));
+  const joined = attempts.filter((item) => item.status === 'fulfilled');
+  const rejected = attempts.filter((item) => item.status === 'rejected');
+  assert.equal(joined.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].reason.code, 'ROOM_FULL');
+  const member = joined[0].value;
+  sockets.push(member.socket);
+  const tab = await connectClient(baseUrl, '同设备标签页', member.clientId, {}, created.room);
+  sockets.push(tab.socket);
+  const presence = await tab.inbox.waitFor((event) => event.type === 'presence');
+  assert.equal(presence.count, 2);
+  assert.equal(presence.users.length, 2);
+  assert.equal((await fetch(`${baseUrl}/api/rooms/${created.room.id}`)).status, 403);
+  const management = await fetch(`${baseUrl}/api/rooms/${created.room.id}`, { headers: { Authorization: `Bearer ${created.ownerToken}` } });
+  assert.equal(management.status, 200, '房主无需占用成员名额也可管理满员房间');
+  assert.deepEqual(await management.json(), { room: created.room, isOwner: true });
+  member.socket.terminate();
+  await owner.inbox.waitFor((event) => event.type === 'presence' && event.users.some((user) => user.name === '同设备标签页'));
+  await assert.rejects(connectClient(baseUrl, '仍然满员', 'device-seats-third', {}, created.room), { code: 'ROOM_FULL' });
+  tab.socket.terminate();
+  await owner.inbox.waitFor((event) => event.type === 'presence' && event.count === 1);
+  const newcomer = await connectClient(baseUrl, '新成员', 'device-seats-new', {}, created.room);
+  sockets.push(newcomer.socket);
+  assert.equal(newcomer.welcome.history[0].text, '满员不可见的历史');
+});
+
+test('聊天室重启后保留记录与房主权限，销毁需正确凭证且清除数据并使原链接失效', async (context) => {
+  const fixture = await roomFixture(context);
+  const { sockets, dataDir } = fixture;
+  let baseUrl = fixture.baseUrl;
+  const created = await createTestRoom(baseUrl, '持久房间', 2);
+  const owner = await connectClient(baseUrl, '房主', 'device-persist-owner', {}, created.room);
+  sockets.push(owner.socket);
+  owner.socket.send(JSON.stringify({ type: 'chat', text: '重启后保留' }));
+  await owner.inbox.waitFor((event) => event.message?.text === '重启后保留');
+  await fixture.restart();
+  baseUrl = fixture.baseUrl;
+  const ownerAgain = await connectClient(baseUrl, '房主', owner.clientId, {}, { ...created.room, ownerToken: created.ownerToken });
+  const guest = await connectClient(baseUrl, '成员', 'device-persist-guest', {}, created.room);
+  sockets.push(ownerAgain.socket, guest.socket);
+  assert.equal(ownerAgain.membership.isOwner, true);
+  assert.equal(ownerAgain.welcome.history[0].text, '重启后保留');
+  const uploaded = await fetch(`${baseUrl}/api/rooms/${created.room.id}/files`, {
+    method: 'POST', headers: {
+      Origin: baseUrl, 'X-Room-Session': guest.welcome.roomSession,
+      'X-File-Name': Buffer.from('to-delete.txt').toString('base64url'),
+    }, body: 'delete with room',
+  });
+  assert.equal(uploaded.status, 201);
+  const roomUrl = `${baseUrl}/api/rooms/${created.room.id}`;
+  for (const token of ['', 'a'.repeat(43)]) {
+    const denied = await fetch(roomUrl, { method: 'DELETE', headers: { Origin: baseUrl, Authorization: `Bearer ${token}` } });
+    assert.equal(denied.status, 403);
+  }
+  const foreignOrigin = await fetch(roomUrl, { method: 'DELETE', headers: { Origin: 'https://elsewhere.invalid', Authorization: `Bearer ${created.ownerToken}` } });
+  assert.equal(foreignOrigin.status, 403);
+  const persisted = JSON.parse(await fs.readFile(path.join(dataDir, 'rooms', created.room.id, 'room.json'), 'utf8'));
+  assert.equal(persisted.ownerToken, undefined);
+  assert.notEqual(persisted.ownerHash, created.ownerToken);
+  const deleted = await fetch(roomUrl, { method: 'DELETE', headers: { Origin: baseUrl, Authorization: `Bearer ${created.ownerToken}` } });
+  assert.equal(deleted.status, 200);
+  await guest.inbox.waitFor((event) => event.type === 'roomDestroyed');
+  await assert.rejects(fs.stat(path.join(dataDir, 'rooms', created.room.id)), { code: 'ENOENT' });
+  await assert.rejects(connectClient(baseUrl, '旧链接', 'device-old-link', {}, created.room), { code: 'ROOM_NOT_FOUND' });
+  assert.equal((await fetch(`${roomUrl}/files`, { headers: { 'X-Room-Session': guest.welcome.roomSession } })).status, 404);
+  await fixture.restart();
+  await assert.rejects(connectClient(fixture.baseUrl, '重启后旧链接', 'device-old-link', {}, created.room), { code: 'ROOM_NOT_FOUND' });
+  assert.equal((await fetch(`${fixture.baseUrl}/api/status`)).status, 200);
+  // Simulate a crash after revocation was persisted but before the directory was removed.
+  const interrupted = await createTestRoom(fixture.baseUrl, '销毁中断', 2);
+  const metadataPath = path.join(dataDir, 'rooms', interrupted.room.id, 'room.json');
+  const metadata = JSON.parse(await fs.readFile(metadataPath, 'utf8'));
+  await fs.writeFile(metadataPath, JSON.stringify({ ...metadata, destroyed: true }));
+  await fixture.restart();
+  await assert.rejects(fs.stat(path.dirname(metadataPath)), { code: 'ENOENT' });
+  await assert.rejects(connectClient(fixture.baseUrl, '失效邀请', 'device-crashed-room', {}, interrupted.room), { code: 'ROOM_NOT_FOUND' });
+});
+
+test('销毁中断上传且不遗留文件，房间切换不能绕过每日额度，创建参数与来源严格校验', async (context) => {
+  const { baseUrl, sockets, dataDir } = await roomFixture(context, { dailyMessageLimit: 2 });
+  for (const input of [{ name: '', capacity: 2 }, { name: '房间', capacity: 0 }, { name: '房间', capacity: 1.5 }, { name: '房间', capacity: '2' }, null]) {
+    assert.equal((await fetch(`${baseUrl}/api/rooms`, { method: 'POST', headers: { Origin: baseUrl }, body: JSON.stringify(input) })).status, 400);
+  }
+  assert.equal((await fetch(`${baseUrl}/api/rooms`, { method: 'POST', headers: { Origin: baseUrl }, body: '{' })).status, 400);
+  assert.equal((await fetch(`${baseUrl}/api/rooms`, { method: 'POST', headers: { Origin: 'https://elsewhere.invalid' }, body: '{}' })).status, 403);
+  assert.equal((await fetch(`${baseUrl}/api/rooms`, { method: 'POST', headers: { Origin: baseUrl }, body: ' '.repeat(8193) })).status, 413);
+  const created = await createTestRoom(baseUrl, '上传销毁测试', 1);
+  const owner = await connectClient(baseUrl, '房主', 'device-destroy-upload', {}, created.room);
+  const publicClient = await connectClient(baseUrl, '同一设备', owner.clientId);
+  sockets.push(owner.socket, publicClient.socket);
+  publicClient.socket.send(JSON.stringify({ type: 'chat', text: '公共消息占用一条' }));
+  await publicClient.inbox.waitFor((event) => event.message?.text === '公共消息占用一条');
+  owner.socket.send(JSON.stringify({ type: 'chat', text: '房间消息占用一条' }));
+  await owner.inbox.waitFor((event) => event.message?.text === '房间消息占用一条');
+  owner.socket.send(JSON.stringify({ type: 'chat', text: '不能绕过限额' }));
+  assert.equal((await owner.inbox.waitFor((event) => event.type === 'error')).code, 'DAILY_MESSAGE_LIMIT');
+  // A different device has quota available for a streaming upload in another room.
+  const uploadRoom = await createTestRoom(baseUrl, '进行中的上传', 1);
+  const uploader = await connectClient(baseUrl, '上传设备', 'device-stream-destroy', {}, uploadRoom.room);
+  sockets.push(uploader.socket);
+  let uploadRequest;
+  const ended = new Promise((resolve) => {
+    uploadRequest = http.request(`${baseUrl}/api/rooms/${uploadRoom.room.id}/files`, {
+      method: 'POST', headers: {
+        Origin: baseUrl, 'Content-Length': 1024 * 1024,
+        'X-File-Name': Buffer.from('unfinished.png').toString('base64url'), 'X-File-Type': 'image/png',
+        'X-Room-Session': uploader.welcome.roomSession, 'X-Upload-Id': 'destroy-stream-upload',
+      },
+    }, (response) => { response.resume(); response.on('end', resolve); });
+    uploadRequest.on('error', resolve);
+  });
+  context.after(() => uploadRequest.destroy());
+  uploadRequest.write(Buffer.alloc(1024));
+  await uploader.inbox.waitFor((event) => event.type === 'uploads' && event.uploads.some((upload) => upload.receivedBytes >= 1024));
+  const deleted = await fetch(`${baseUrl}/api/rooms/${uploadRoom.room.id}`, {
+    method: 'DELETE', headers: { Origin: baseUrl, Authorization: `Bearer ${uploadRoom.ownerToken}` },
+  });
+  assert.equal(deleted.status, 200);
+  await ended;
+  await assert.rejects(fs.stat(path.join(dataDir, 'rooms', uploadRoom.room.id)), { code: 'ENOENT' });
+  const usage = JSON.parse(await fs.readFile(path.join(dataDir, 'chat-usage.json'), 'utf8'));
+  assert.equal(new Map(usage.counts).get(uploader.clientId) || 0, 0);
+});
+
+async function roomFixture(context, options = {}) {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-rooms-'));
+  let app = await createLanDropServer({ host: '127.0.0.1', port: 0, dataDir, ...options });
+  const sockets = [];
+  const fixture = { dataDir, sockets, baseUrl: `http://127.0.0.1:${(await app.start()).port}` };
+  fixture.restart = async () => {
+    await app.stop();
+    app = await createLanDropServer({ host: '127.0.0.1', port: 0, dataDir, ...options });
+    fixture.baseUrl = `http://127.0.0.1:${(await app.start()).port}`;
+  };
+  context.after(async () => {
+    for (const socket of sockets) socket.terminate();
+    await app.stop();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  });
+  return fixture;
+}
+
+async function createTestRoom(baseUrl, name, capacity) {
+  const response = await fetch(`${baseUrl}/api/rooms`, {
+    method: 'POST', headers: { Origin: baseUrl, 'Content-Type': 'application/json' }, body: JSON.stringify({ name, capacity }),
+  });
+  assert.equal(response.status, 201);
+  return response.json();
+}
+
+function connectClient(baseUrl, name, deviceId = `device-${Date.now()}-${Math.random()}`, headers = {}, room = {}) {
   return new Promise((resolve, reject) => {
     const socketUrl = new URL('/ws', baseUrl);
     socketUrl.protocol = 'ws:';
     socketUrl.searchParams.set('deviceId', deviceId);
+    if (room.id) socketUrl.searchParams.set('room', room.id);
     const socket = new WebSocket(socketUrl, { origin: baseUrl, headers });
     const inbox = createInbox(socket);
     const timeout = setTimeout(() => reject(new Error('WebSocket connection timed out')), 3_000);
 
-    inbox.waitFor((message) => message.type === 'welcome').then((welcome) => {
+    inbox.waitFor((message) => ['welcome', 'error'].includes(message.type)).then(async (welcome) => {
       clearTimeout(timeout);
-      socket.send(JSON.stringify({ type: 'join', name }));
-      resolve({ socket, inbox, clientId: welcome.clientId, welcome });
-    }, reject);
+      if (welcome.type === 'error') {
+        socket.close();
+        throw Object.assign(new Error(welcome.message), { code: welcome.code });
+      }
+      socket.send(JSON.stringify({ type: 'join', name, ownerToken: room.ownerToken }));
+      const membership = room.id ? await inbox.waitFor((message) => message.type === 'room') : null;
+      resolve({ socket, inbox, clientId: welcome.clientId, welcome, membership });
+    }).catch(reject);
     socket.once('error', reject);
   });
 }
