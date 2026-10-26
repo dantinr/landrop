@@ -819,6 +819,10 @@ textarea:focus-visible,
   font-weight: 600;
 }
 
+.room-form [hidden] {
+  display: none;
+}
+
 .room-form input {
   width: 100%;
   min-width: 0;

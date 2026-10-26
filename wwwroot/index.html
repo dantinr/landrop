@@ -146,9 +146,11 @@
         <label>聊天室名称<input id="room-name" name="roomName" type="text" maxlength="40" placeholder="例如：周末小聚" required autofocus></label>
         <label>人数上限<input id="room-capacity" name="capacity" type="number" min="1" step="1" value="10" required></label>
         <p class="room-hint">人数包含房主，同一设备的多个标签页占一个名额。创建后可复制专有邀请链接。</p>
+        <p class="room-hint">新聊天室会在新标签页打开，当前聊天窗口会保留。</p>
         <p class="room-hint">请在创建房间的浏览器中管理房间；房主可随时销毁房间及其中的记录和文件。</p>
         <p class="room-form-error" id="room-form-error" role="alert"></p>
-        <button class="primary-button" id="submit-create-room" type="submit">创建并进入</button>
+        <a class="secondary-button" id="created-room-link" target="_blank" rel="noopener" hidden>打开已创建的聊天室</a>
+        <button class="primary-button" id="submit-create-room" type="submit">创建并在新标签页打开</button>
       </form>
     </dialog>
 

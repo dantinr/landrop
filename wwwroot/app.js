@@ -49,6 +49,7 @@ const elements = {
   roomCapacity: document.querySelector('#room-capacity'),
   roomFormError: document.querySelector('#room-form-error'),
   submitCreateRoom: document.querySelector('#submit-create-room'),
+  createdRoomLink: document.querySelector('#created-room-link'),
   inviteRoom: document.querySelector('#invite-room'),
   publicRoom: document.querySelector('#public-room'),
   destroyRoom: document.querySelector('#destroy-room'),
@@ -106,6 +107,7 @@ function init() {
 function bindEvents() {
   elements.createRoom.addEventListener('click', () => {
     elements.roomFormError.textContent = '';
+    elements.createdRoomLink.hidden = true;
     elements.createRoomDialog.showModal();
   });
   elements.closeCreateRoom.addEventListener('click', () => elements.createRoomDialog.close());
@@ -285,6 +287,9 @@ function handleSocketPayload(payload) {
   }
 
   if (payload.type === 'message' && payload.message) {
+    if (payload.message.kind === 'offline') {
+      updateTypingUser({ clientId: payload.message.sender?.id, active: false });
+    }
     appendMessage(payload.message);
     if (payload.message.kind === 'file' && payload.message.file) {
       state.files.set(payload.message.file.id, payload.message.file);
@@ -469,11 +474,11 @@ function appendMessage(message, animateScroll = true) {
   if (message.kind === 'file' && isImageFile(message.file)) row.classList.add('image-message-row');
   row.dataset.messageId = message.id;
 
-  if (message.kind === 'online') {
+  if (message.kind === 'online' || message.kind === 'offline') {
     row.classList.add('system-message-row');
     const notice = document.createElement('span');
     notice.className = 'system-message';
-    notice.textContent = `${formatSenderIdentity(message.sender)} 上线了`;
+    notice.textContent = `${formatSenderIdentity(message.sender)} ${message.kind === 'offline' ? '已经离开房间...' : '上线了'}`;
     row.append(notice);
   } else {
     const avatar = document.createElement('div');
@@ -1076,8 +1081,17 @@ function renderRoom(serverName) {
 
 async function createRoom(event) {
   event.preventDefault();
+  // Open during the submit gesture; opening after fetch can trigger popup blockers.
+  const roomWindow = window.open('', '_blank');
+  if (!roomWindow) {
+    elements.roomFormError.textContent = '浏览器拦截了新标签页，请允许弹出窗口后重试。';
+    return;
+  }
+  roomWindow.opener = null;
   elements.submitCreateRoom.disabled = true;
   elements.roomFormError.textContent = '';
+  elements.createdRoomLink.hidden = true;
+  let created = false;
   try {
     // Check persistence before creating a room so the owner credential survives navigation.
     localStorage.setItem('landrop-storage-check', '1');
@@ -1089,8 +1103,15 @@ async function createRoom(event) {
     const result = await response.json();
     if (!response.ok) throw new Error(result.message || '创建失败');
     localStorage.setItem(`landrop-owner-${result.room.id}`, result.ownerToken);
-    location.assign(result.room.invitePath);
+    created = true;
+    elements.createdRoomLink.href = result.room.invitePath;
+    if (roomWindow.closed) throw new Error('新标签页已关闭，请点击下方链接打开已创建的聊天室。');
+    roomWindow.location.replace(new URL(result.room.invitePath, location.origin).href);
+    elements.createRoomDialog.close();
+    showToast('聊天室已在新标签页打开');
   } catch (error) {
+    if (!roomWindow.closed) roomWindow.close();
+    elements.createdRoomLink.hidden = !created;
     elements.roomFormError.textContent = error.message || '创建失败，请检查浏览器是否允许本地存储';
   } finally {
     elements.submitCreateRoom.disabled = false;

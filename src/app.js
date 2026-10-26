@@ -43,6 +43,7 @@ async function createLanDropServer(options = {}) {
   const fileStore = rooms.publicRoom.fileStore;
 
   const allClients = new Set();
+  let stopping = false;
   const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
 
   const broadcastQuota = (deviceId) => {
@@ -386,7 +387,19 @@ async function createLanDropServer(options = {}) {
       clearTimeout(joinTimeout);
       allClients.delete(client);
       if (!clients.delete(client)) return;
+      if (room.destroyed || stopping) return;
       broadcastPresence(clients, Boolean(room.id));
+      if (client.ready && !readyClients(clients).some((online) => online.id === client.id)) {
+        broadcast(clients, {
+          type: 'message',
+          message: {
+            id: crypto.randomUUID(),
+            kind: 'offline',
+            sender: publicSender(client),
+            createdAt: new Date().toISOString(),
+          },
+        });
+      }
     };
     webSocket.on('close', removeClient);
     webSocket.on('error', removeClient);
@@ -420,6 +433,7 @@ async function createLanDropServer(options = {}) {
       return server.address();
     },
     async stop() {
+      stopping = true;
       clearInterval(heartbeat);
       for (const room of rooms.all()) clearTimeout(room.uploadBroadcastTimer);
       for (const client of allClients) client.webSocket.terminate();

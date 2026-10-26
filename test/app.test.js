@@ -188,6 +188,77 @@ test('设备上线时广播提示，改名和同设备多标签页不重复，�
   assert.deepEqual(stored.map((message) => message.kind), ['text', 'text']);
 });
 
+for (const privateRoom of [false, true]) {
+  test(`${privateRoom ? '专有' : '公共'}房间仅在设备最后一个连接退出时提示离开，未加入与服务停止不误报`, async (context) => {
+    const fixture = await roomFixture(context);
+    const { baseUrl, sockets, dataDir } = fixture;
+    const created = privateRoom ? await createTestRoom(baseUrl, '离线提示测试', 3) : null;
+    const room = created?.room || {};
+    const observer = await connectClient(baseUrl, '观察设备', 'device-leave-observer', {}, room);
+    const sender = await connectClient(baseUrl, '离开设备', 'device-leave-sender', {}, room);
+    sockets.push(observer.socket, sender.socket);
+    await observer.inbox.waitFor((event) => event.type === 'presence' && event.count === 2);
+    const departures = [];
+    observer.socket.on('message', (buffer) => {
+      const event = JSON.parse(buffer);
+      if (event.message?.kind === 'offline') departures.push(event.message);
+    });
+    const outsideDepartures = [];
+    if (privateRoom) {
+      const outside = await connectClient(baseUrl, '公共成员', 'device-leave-outside');
+      sockets.push(outside.socket);
+      outside.socket.on('message', (buffer) => {
+        const event = JSON.parse(buffer);
+        if (event.message?.kind === 'offline') outsideDepartures.push(event.message);
+      });
+    }
+    sender.socket.send(JSON.stringify({ type: 'chat', text: '离开前的消息' }));
+    await observer.inbox.waitFor((event) => event.message?.text === '离开前的消息');
+    const tab = await connectClient(baseUrl, '同设备标签页', sender.clientId, {}, room);
+    sockets.push(tab.socket);
+    await observer.inbox.waitFor((event) => event.type === 'presence'
+      && event.users.some((user) => user.name === '同设备标签页'));
+    sender.socket.terminate();
+    await observer.inbox.waitFor((event) => event.type === 'presence' && event.count === 2);
+    assert.equal(departures.length, 0, '还有同设备标签页时不应提示离开');
+    tab.socket.send(JSON.stringify({ type: 'join', name: '最后昵称' }));
+    await observer.inbox.waitFor((event) => event.type === 'presence'
+      && event.users.some((user) => user.name === '最后昵称'));
+    tab.socket.close();
+    const departed = await observer.inbox.waitFor((event) => event.message?.kind === 'offline');
+    assert.deepEqual(departed.message.sender, { id: sender.clientId, name: '最后昵称', ip: '127.0.0.1' });
+    assert.equal(Number.isNaN(Date.parse(departed.message.createdAt)), false);
+    assert.equal(departures.length, 1, '同一次关闭只能提示一次');
+    assert.deepEqual(outsideDepartures, [], '离开提示不能广播到其他房间');
+    const again = await connectClient(baseUrl, '重新进入', sender.clientId, {}, room);
+    sockets.push(again.socket);
+    assert.deepEqual(again.welcome.history.map((message) => message.kind), ['text']);
+    assert.equal(again.welcome.chatQuota.used, 1, '离开提示不能扣除发送额度');
+    await observer.inbox.waitFor((event) => event.type === 'presence' && event.count === 2);
+    const unjoinedUrl = new URL('/ws', baseUrl);
+    unjoinedUrl.protocol = 'ws:';
+    if (room.id) unjoinedUrl.searchParams.set('room', room.id);
+    const unjoined = new WebSocket(unjoinedUrl, { origin: baseUrl });
+    sockets.push(unjoined);
+    await createInbox(unjoined).waitFor((event) => event.type === 'welcome');
+    unjoined.terminate();
+    await observer.inbox.waitFor((event) => event.type === 'presence' && event.count === 2);
+    assert.equal(departures.length, 1, '没有加入房间的连接不应提示离开');
+    const messagesPath = room.id
+      ? path.join(dataDir, 'rooms', room.id, 'messages.json') : path.join(dataDir, 'messages.json');
+    assert.deepEqual(JSON.parse(await fs.readFile(messagesPath, 'utf8')).map((message) => message.kind), ['text']);
+    if (privateRoom) {
+      const response = await fetch(`${baseUrl}/api/rooms/${room.id}`, {
+        method: 'DELETE', headers: { Origin: baseUrl, Authorization: `Bearer ${created.ownerToken}` },
+      });
+      assert.equal(response.status, 200);
+      await observer.inbox.waitFor((event) => event.type === 'roomDestroyed');
+    }
+    await fixture.restart();
+    assert.equal(departures.length, 1, '销毁房间或停止服务时不应逐个提示离开');
+  });
+}
+
 for (const trustLoopbackProxy of [false, true]) {
   test(`代理 IP ${trustLoopbackProxy ? '启用' : '禁用'}时，聊天、在线成员、上传和持久化使用正确地址`, async (context) => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-proxy-test-'));
