@@ -10,6 +10,7 @@ const elements = {
   nameInput: document.querySelector('#name-input'),
   copyAddress: document.querySelector('#copy-address'),
   serverName: document.querySelector('#server-name'),
+  chatQuota: document.querySelector('#chat-quota'),
   clearView: document.querySelector('#clear-view'),
   messages: document.querySelector('#messages'),
   chatEmpty: document.querySelector('#chat-empty'),
@@ -45,6 +46,8 @@ const state = {
   deviceId: loadDeviceId(),
   clientId: null,
   connected: false,
+  chatQuota: null,
+  quotaTimer: null,
   reconnectDelay: 800,
   reconnectTimer: null,
   nameTimer: null,
@@ -131,6 +134,9 @@ function bindEvents() {
 
   elements.refreshFiles.addEventListener('click', refreshFiles);
   mobileChatMedia.addEventListener('change', updateResponsiveLayout);
+  window.addEventListener('focus', () => {
+    if (state.connected) sendSocket({ type: 'chatQuota' });
+  });
   window.addEventListener('beforeunload', (event) => {
     if ([...state.uploads.values()].some((upload) => upload.status === 'uploading')) {
       event.preventDefault();
@@ -186,6 +192,7 @@ function handleSocketPayload(payload) {
     state.clientId = payload.clientId;
     state.connected = true;
     state.reconnectDelay = 800;
+    updateChatQuota(payload.chatQuota);
     elements.serverName.textContent = `${payload.serverName || '局域网'} · 公共房间`;
     renderHistory(payload.history || []);
     replaceFiles(payload.files || []);
@@ -222,8 +229,33 @@ function handleSocketPayload(payload) {
   }
 
   if (payload.type === 'error') {
+    if (payload.chatQuota) updateChatQuota(payload.chatQuota);
+    if (['DAILY_MESSAGE_LIMIT', 'DAILY_CHAT_LIMIT'].includes(payload.code)
+      && !elements.messageInput.value && payload.text) {
+      elements.messageInput.value = payload.text;
+      resizeComposer();
+    }
     showToast(payload.message || '消息发送失败', true);
   }
+  if (payload.type === 'chatQuota') updateChatQuota(payload.chatQuota);
+}
+
+function updateChatQuota(quota) {
+  if (!quota || !Number.isSafeInteger(quota.limit) || quota.limit < 0
+    || (quota.limit > 0 && !Number.isSafeInteger(quota.remaining))) return;
+  state.chatQuota = quota;
+  elements.chatQuota.textContent = quota.limit === 0
+    ? '每日发送不限'
+    : quota.remaining === 0
+      ? `今日已达 ${quota.limit} 条，北京时间零点恢复`
+      : `今日剩余 ${quota.remaining}/${quota.limit} 条 · 文字、文件及图片合计`;
+  elements.sendButton.disabled = !state.connected || quota.remaining === 0;
+  clearTimeout(state.quotaTimer);
+  if (quota.limit === 0) return;
+  const delay = Date.parse(quota.resetAt) - Date.now();
+  state.quotaTimer = setTimeout(() => {
+    if (state.connected) sendSocket({ type: 'chatQuota' });
+  }, Math.min(Math.max(delay + 100, 1000), 24 * 60 * 60 * 1000));
 }
 
 function sendSocket(payload) {
@@ -238,7 +270,7 @@ function setConnectionState(kind, label) {
   elements.connectionLabel.textContent = label;
   elements.connectionState.title = label;
   elements.connectionState.setAttribute('aria-label', label);
-  elements.sendButton.disabled = kind !== 'connected';
+  elements.sendButton.disabled = kind !== 'connected' || state.chatQuota?.remaining === 0;
   elements.chooseImages.disabled = kind !== 'connected';
 }
 
@@ -276,6 +308,10 @@ function sendMessage(event) {
   if (!text) return;
   if (!state.connected) {
     showToast('尚未连接到聊天室', true);
+    return;
+  }
+  if (state.chatQuota?.remaining === 0) {
+    showToast(`今日发送已达 ${state.chatQuota.limit} 条，北京时间零点恢复`, true);
     return;
   }
   if (sendSocket({ type: 'chat', text })) {

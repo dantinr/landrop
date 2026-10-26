@@ -11,13 +11,15 @@
 
 ## 目录职责
 
-- `server.js`：命令行入口，读取端口和数据目录，启动及停止服务。
+- `server.js`：命令行入口，读取配置、端口和数据目录，启动及停止服务。
+- `config.json`、`src/config.js`：每日发送上限配置及读取校验；`0` 表示不限，修改后重启生效。
 - `src/app.js`：HTTP、WebSocket、静态资源白名单、安全响应头和局域网地址发现。
 - `src/client-ip.js`：客户端 IP 规范化及本机可信反向代理标头解析。
 - `src/validation.js`：用户输入、文件名、MIME 类型和下载范围校验。
 - `src/json-store.js`：JSON 数据的排队与原子写入。
 - `src/file-store.js`：文件流式写入、索引、临时文件清理和空间查询。
 - `src/chat-store.js`：聊天记录持久化和数量限制。
+- `src/daily-message-limit.js`：按设备统计文字、文件和图片的每日共享额度，北京时间零点重置；计数独立持久化，失败上传退回额度。
 - `wwwroot/`：无需构建即可运行的浏览器界面；Lucide 是仓库内分发的第三方资源。
 - `test/app.test.js`：基于 `node:test` 的集成、输入校验和版本一致性测试。
 - `data/`、`node_modules/`：本地生成内容，禁止提交。

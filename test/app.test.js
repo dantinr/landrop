@@ -10,6 +10,8 @@ const { Readable } = require('node:stream');
 const test = require('node:test');
 const { WebSocket } = require('ws');
 const { createLanDropServer } = require('../src/app');
+const { readConfig } = require('../src/config');
+const { DailyMessageLimit, messageDay } = require('../src/daily-message-limit');
 const { FileStore } = require('../src/file-store');
 const { decodeFileName, parseByteRange } = require('../src/validation');
 
@@ -328,7 +330,7 @@ test('局域网设备可以看到进行中的上传', async (context) => {
 
 test('并发、重复编号和中断不会留下过期上传状态', async (context) => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-upload-abort-test-'));
-  const app = await createLanDropServer({ host: '127.0.0.1', port: 0, dataDir });
+  const app = await createLanDropServer({ host: '127.0.0.1', port: 0, dataDir, dailyMessageLimit: 2 });
   const address = await app.start();
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const sockets = [];
@@ -445,6 +447,8 @@ test('并发、重复编号和中断不会留下过期上传状态', async (cont
     app.fileStore.list().map((file) => file.name).sort(),
     ['other.bin', 'reused.bin'],
   );
+  const dailyCounts = JSON.parse(await fs.readFile(path.join(dataDir, 'chat-usage.json'), 'utf8'));
+  assert.equal(new Map(dailyCounts.counts).get(sender.clientId), 2);
 });
 
 test('上传文件以原名和 IP 保存，同名文件不会覆盖', async (context) => {
@@ -581,6 +585,198 @@ test('VERSION 与 npm 元数据遵循版本约定', async () => {
   assert.equal(packageMetadata.version, version);
   assert.equal(packageLock.version, version);
   assert.equal(packageLock.packages[''].version, version);
+});
+
+test('每日消息上限配置默认不限，支持正整数，非法配置会阻止启动', async (context) => {
+  const configDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-config-test-'));
+  const configPath = path.join(configDir, 'config.json');
+  context.after(() => fs.rm(configDir, { recursive: true, force: true }));
+
+  assert.deepEqual(await readConfig(configPath), { dailyMessageLimit: 0 });
+  for (const config of [{}, { dailyMessageLimit: 0 }, { dailyMessageLimit: 100 }]) {
+    await fs.writeFile(configPath, `\uFEFF${JSON.stringify(config)}`);
+    assert.deepEqual(await readConfig(configPath), {
+      dailyMessageLimit: config.dailyMessageLimit ?? 0,
+    });
+  }
+  for (const value of [-1, 1.5, '100', null, true, Number.MAX_SAFE_INTEGER + 1]) {
+    await fs.writeFile(configPath, JSON.stringify({ dailyMessageLimit: value }));
+    await assert.rejects(readConfig(configPath), /dailyMessageLimit 必须是非负整数/u);
+  }
+  for (const config of [null, [], 100, 'invalid']) {
+    await fs.writeFile(configPath, JSON.stringify(config));
+    await assert.rejects(readConfig(configPath), /配置文件必须是 JSON 对象/u);
+  }
+  await fs.writeFile(configPath, '{ invalid json');
+  await assert.rejects(readConfig(configPath), /配置文件不是有效的 JSON/u);
+});
+
+test('文字、文件和图片按设备共享每日上限，改名、多标签页和重启不能重置', async (context) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-daily-limit-test-'));
+  const options = { host: '127.0.0.1', port: 0, dataDir, dailyMessageLimit: 3 };
+  let app = await createLanDropServer(options);
+  let address = await app.start();
+  let baseUrl = `http://127.0.0.1:${address.port}`;
+  const sockets = [];
+  context.after(async () => {
+    for (const socket of sockets) socket.terminate();
+    await app.stop();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  });
+
+  const sender = await connectClient(baseUrl, '发送设备', 'device-daily-limit');
+  sockets.push(sender.socket);
+  assert.equal(sender.welcome.chatQuota.limit, 3);
+  assert.equal(sender.welcome.chatQuota.remaining, 3);
+  sender.socket.send(JSON.stringify({ type: 'chat', text: '' }));
+  assert.equal((await sender.inbox.waitFor((event) => event.type === 'error')).code, 'INVALID_MESSAGE');
+  sender.socket.send(JSON.stringify({ type: 'chat', text: '第 1 条' }));
+  await sender.inbox.waitFor((event) => event.message?.text === '第 1 条');
+  for (const [name, mime] of [['文档.txt', 'text/plain'], ['图片.png', 'image/png']]) {
+    const response = await fetch(`${baseUrl}/api/files`, {
+      method: 'POST',
+      headers: {
+        Origin: baseUrl,
+        'X-Client-Id': sender.clientId,
+        'X-File-Name': Buffer.from(name).toString('base64url'),
+        'X-File-Type': mime,
+      },
+      body: 'daily limit test',
+    });
+    assert.equal(response.status, 201);
+    await response.json();
+  }
+
+  sender.socket.send(JSON.stringify({ type: 'join', name: '新昵称' }));
+  sender.socket.send(JSON.stringify({ type: 'chat', text: '超限文字' }));
+  const error = await sender.inbox.waitFor((event) => event.type === 'error');
+  assert.equal(error.code, 'DAILY_MESSAGE_LIMIT');
+  assert.match(error.message, /3 条上限/u);
+  assert.equal(error.chatQuota.remaining, 0);
+  assert.equal(error.text, '超限文字');
+  const rejectedUpload = await fetch(`${baseUrl}/api/files`, {
+    method: 'POST',
+    headers: {
+      Origin: baseUrl,
+      'X-Client-Id': sender.clientId,
+      'X-File-Name': Buffer.from('超限文件.txt').toString('base64url'),
+    },
+    body: 'not saved',
+  });
+  assert.equal(rejectedUpload.status, 429);
+  assert.equal((await rejectedUpload.json()).error, 'DAILY_MESSAGE_LIMIT');
+  assert.equal(app.fileStore.list().length, 2);
+  assert.deepEqual(await fs.readdir(path.join(dataDir, 'incoming')), []);
+
+  const tab = await connectClient(baseUrl, '另一标签页', sender.clientId);
+  const other = await connectClient(baseUrl, '另一个设备', 'device-daily-other');
+  sockets.push(tab.socket, other.socket);
+  tab.socket.send(JSON.stringify({ type: 'chat', text: '同设备超限' }));
+  assert.equal((await tab.inbox.waitFor((event) => event.type === 'error')).code, 'DAILY_MESSAGE_LIMIT');
+  other.socket.send(JSON.stringify({ type: 'chat', text: '其他设备仍可发送' }));
+  await other.inbox.waitFor((event) => event.message?.text === '其他设备仍可发送');
+
+  await app.stop();
+  app = await createLanDropServer(options);
+  address = await app.start();
+  baseUrl = `http://127.0.0.1:${address.port}`;
+  const reconnected = await connectClient(baseUrl, '重连设备', sender.clientId);
+  sockets.push(reconnected.socket);
+  assert.equal(reconnected.welcome.history.length, 4);
+  reconnected.socket.send(JSON.stringify({ type: 'chat', text: '重启后仍超限' }));
+  assert.equal((await reconnected.inbox.waitFor((event) => event.type === 'error')).code, 'DAILY_MESSAGE_LIMIT');
+  const stored = JSON.parse(await fs.readFile(path.join(dataDir, 'chat-usage.json'), 'utf8'));
+  assert.equal(new Map(stored.counts).get(sender.clientId), 3);
+  assert.equal(new Map(stored.counts).get(other.clientId), 1);
+});
+
+test('默认可连续发送超过 100 条，历史淘汰及随后启用上限不会丢失当天计数', async (context) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-unlimited-test-'));
+  const options = { host: '127.0.0.1', port: 0, dataDir };
+  let app = await createLanDropServer(options);
+  const address = await app.start();
+  const sockets = [];
+  context.after(async () => {
+    for (const socket of sockets) socket.terminate();
+    await app.stop();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  });
+  const client = await connectClient(`http://127.0.0.1:${address.port}`, '不限设备', 'device-unlimited');
+  sockets.push(client.socket);
+  assert.equal(client.welcome.chatQuota.limit, 0);
+  assert.equal(client.welcome.chatQuota.remaining, null);
+  for (let index = 1; index <= 201; index += 1) {
+    client.socket.send(JSON.stringify({ type: 'chat', text: `不限消息 ${index}` }));
+    await client.inbox.waitFor((event) => event.message?.text === `不限消息 ${index}`);
+  }
+  const history = JSON.parse(await fs.readFile(path.join(dataDir, 'messages.json'), 'utf8'));
+  assert.equal(history.length, 200);
+  assert.equal(history[0].text, '不限消息 2');
+  const counts = JSON.parse(await fs.readFile(path.join(dataDir, 'chat-usage.json'), 'utf8'));
+  assert.equal(new Map(counts.counts).get(client.clientId), 201);
+
+  await app.stop();
+  app = await createLanDropServer({ ...options, dailyMessageLimit: 201 });
+  const restarted = await app.start();
+  const reconnected = await connectClient(`http://127.0.0.1:${restarted.port}`, '仍是同设备', client.clientId);
+  sockets.push(reconnected.socket);
+  reconnected.socket.send(JSON.stringify({ type: 'chat', text: '启用上限后被拒绝' }));
+  assert.equal((await reconnected.inbox.waitFor((event) => event.type === 'error')).code, 'DAILY_MESSAGE_LIMIT');
+});
+
+test('每日额度并发预占不会超发或阻塞其他设备，发送失败退回且计数跨日重置', async (context) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-daily-queue-test-'));
+  context.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const countPath = path.join(dataDir, 'chat-usage.json');
+  await fs.writeFile(countPath, JSON.stringify({ date: '2000-01-01', counts: [['device', 10]] }));
+  const quota = new DailyMessageLimit(dataDir, 1);
+  await quota.init();
+  let rejectSend;
+  let started;
+  const ready = new Promise((resolve) => { started = resolve; });
+  const pending = quota.run('device', () => new Promise((resolve, reject) => {
+    rejectSend = reject;
+    started();
+  }));
+  const failed = assert.rejects(pending, /模拟发送失败/u);
+  await ready;
+  await assert.rejects(quota.run('device', () => assert.fail('不能超发')), { code: 'DAILY_MESSAGE_LIMIT' });
+  await quota.run('other-device', async () => {});
+  rejectSend(new Error('模拟发送失败'));
+  await failed;
+  await quota.run('device', async () => {});
+  const stored = JSON.parse(await fs.readFile(countPath, 'utf8'));
+  assert.equal(stored.date, messageDay());
+  assert.deepEqual(new Map(stored.counts), new Map([['device', 1], ['other-device', 1]]));
+  assert.equal(messageDay(new Date('2026-10-26T15:59:59.999Z')), '2026-10-26');
+  assert.equal(messageDay(new Date('2026-10-26T16:00:00.000Z')), '2026-10-27');
+
+  await fs.writeFile(countPath, JSON.stringify({ date: messageDay(), counts: [['device', -1]] }));
+  await assert.rejects(new DailyMessageLimit(dataDir, 1).init(), /每日消息计数文件无效/u);
+  await assert.rejects(createLanDropServer({ dataDir, dailyMessageLimit: -1 }), /dailyMessageLimit 必须是非负整数/u);
+});
+
+test('已部署版本的当天计数可继续使用，查询额度会在北京时间零点恢复', async (context) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-legacy-quota-test-'));
+  context.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dataDir, 'chat-usage.json'), JSON.stringify({
+    date: '2026-10-26', counts: [['legacy-device', 100]],
+  }));
+  let now = Date.parse('2026-10-26T15:59:59.000Z');
+  const quota = new DailyMessageLimit(dataDir, 0, () => now);
+  await quota.init();
+  assert.deepEqual(quota.status('legacy-device'), {
+    date: '2026-10-26', limit: 0, used: 100, remaining: null,
+    resetAt: '2026-10-26T16:00:00.000Z',
+  });
+  await quota.run('legacy-device', async () => {});
+  assert.equal(quota.status('legacy-device').used, 101);
+  now = Date.parse('2026-10-26T16:00:00.000Z');
+  assert.equal(quota.status('legacy-device').used, 0);
+  await quota.run('legacy-device', async () => {});
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, 'chat-usage.json'), 'utf8')), {
+    date: '2026-10-27', counts: [['legacy-device', 1]],
+  });
 });
 
 function connectClient(baseUrl, name, deviceId = `device-${Date.now()}-${Math.random()}`, headers = {}) {

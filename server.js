@@ -2,6 +2,7 @@
 
 const path = require('node:path');
 const { createLanDropServer, getLanAddresses } = require('./src/app');
+const { readConfig } = require('./src/config');
 
 function readPort() {
   const portArgument = process.argv.find((argument) => argument.startsWith('--port='));
@@ -16,6 +17,7 @@ function readPort() {
 }
 
 async function main() {
+  const config = await readConfig();
   const port = readPort();
   const dataDir = process.env.LANDROP_DATA_DIR
     ? path.resolve(process.env.LANDROP_DATA_DIR)
@@ -25,6 +27,7 @@ async function main() {
     port,
     host: process.env.HOST || '0.0.0.0',
     dataDir,
+    dailyMessageLimit: config.dailyMessageLimit,
     trustLoopbackProxy: process.env.LANDROP_TRUST_PROXY === 'loopback',
   });
 
@@ -38,6 +41,9 @@ async function main() {
     console.log('  局域网访问: ' + address);
   }
   console.log('  文件目录:  ' + path.join(dataDir, 'uploads'));
+  console.log('  每日发送:  ' + (config.dailyMessageLimit === 0
+    ? '不限'
+    : `每设备 ${config.dailyMessageLimit} 条（文字、文件和图片合计）`));
   console.log('');
   console.log('  按 Ctrl+C 停止服务。');
 

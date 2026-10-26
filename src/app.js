@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const { WebSocketServer, WebSocket } = require('ws');
 const { ChatStore } = require('./chat-store');
 const { remoteAddress } = require('./client-ip');
+const { DailyMessageLimit } = require('./daily-message-limit');
 const { FileStore, FILE_ID_PATTERN, MAX_UPLOAD_BYTES } = require('./file-store');
 const {
   HttpError,
@@ -36,14 +37,23 @@ async function createLanDropServer(options = {}) {
   const publicDir = path.resolve(options.publicDir || path.join(__dirname, '..', 'wwwroot'));
   const serverName = options.serverName || os.hostname();
   const trustLoopbackProxy = options.trustLoopbackProxy === true;
+  const dailyMessageLimit = new DailyMessageLimit(dataDir, options.dailyMessageLimit, options.now);
   const fileStore = new FileStore(dataDir);
   const chatStore = new ChatStore(dataDir);
-  await Promise.all([fileStore.init(), chatStore.init()]);
+  await Promise.all([fileStore.init(), chatStore.init(), dailyMessageLimit.init()]);
 
   const clients = new Set();
   const activeUploads = new Map();
   let uploadBroadcastTimer = null;
   const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
+
+  const broadcastQuota = (deviceId) => {
+    for (const client of clients) {
+      if (client.id === deviceId) {
+        sendSocket(client.webSocket, { type: 'chatQuota', chatQuota: dailyMessageLimit.status(deviceId) });
+      }
+    }
+  };
 
   const broadcastUploadsNow = () => {
     if (uploadBroadcastTimer) {
@@ -118,15 +128,16 @@ async function createLanDropServer(options = {}) {
         activeUploads.set(uploadId, activeUpload);
         broadcastUploadsNow();
 
+        const quotaDeviceId = claimedClientId ? sender.id : `ip:${sender.ip}`;
         try {
-          const file = await fileStore.receive(
+          const file = await dailyMessageLimit.run(quotaDeviceId, () => fileStore.receive(
             request,
             { fileName, mimeType, sender },
             (receivedBytes) => {
               activeUpload.receivedBytes = receivedBytes;
               scheduleUploadBroadcast();
             },
-          );
+          ));
           activeUpload.receivedBytes = file.size;
           activeUpload.totalBytes = file.size;
           const message = {
@@ -145,6 +156,7 @@ async function createLanDropServer(options = {}) {
         } finally {
           if (activeUploads.get(uploadId) === activeUpload) activeUploads.delete(uploadId);
           broadcastUploadsNow();
+          broadcastQuota(quotaDeviceId);
         }
       }
 
@@ -162,7 +174,7 @@ async function createLanDropServer(options = {}) {
 
       throw new HttpError(404, '页面不存在', 'NOT_FOUND');
     } catch (error) {
-      if (error instanceof HttpError && error.status === 413) {
+      if (error instanceof HttpError && (error.status === 413 || error.status === 429)) {
         response.setHeader('Connection', 'close');
       }
       handleHttpError(error, response);
@@ -202,6 +214,7 @@ async function createLanDropServer(options = {}) {
     sendSocket(webSocket, {
       type: 'welcome',
       clientId: client.id,
+      chatQuota: dailyMessageLimit.status(client.id),
       history: chatStore.list(),
       files: fileStore.list().map(publicFile),
       uploads: publicActiveUploads(activeUploads),
@@ -252,8 +265,23 @@ async function createLanDropServer(options = {}) {
             text: normalizeChatText(payload.text),
             createdAt: new Date().toISOString(),
           };
-          await chatStore.add(message);
+          try {
+            await dailyMessageLimit.run(client.id, () => chatStore.add(message));
+          } catch (error) {
+            if (!(error instanceof HttpError)) throw error;
+            sendSocket(webSocket, {
+              type: 'error', code: error.code, status: error.status, message: error.message,
+              chatQuota: dailyMessageLimit.status(client.id), text: message.text,
+            });
+            return;
+          }
+          broadcastQuota(client.id);
           broadcast(clients, { type: 'message', message });
+          return;
+        }
+
+        if (payload.type === 'chatQuota') {
+          sendSocket(webSocket, { type: 'chatQuota', chatQuota: dailyMessageLimit.status(client.id) });
           return;
         }
 
@@ -269,7 +297,11 @@ async function createLanDropServer(options = {}) {
 
         throw new HttpError(400, '未知消息类型', 'UNKNOWN_SOCKET_MESSAGE');
       } catch (error) {
-        socketError(webSocket, error instanceof HttpError ? error.message : '消息格式无效');
+        socketError(
+          webSocket,
+          error instanceof HttpError ? error.message : '消息格式无效',
+          error instanceof HttpError ? error.code : undefined,
+        );
       }
     });
 
@@ -413,8 +445,8 @@ function parseNonNegativeInteger(value) {
   return Number.isSafeInteger(number) ? number : null;
 }
 
-function socketError(webSocket, message) {
-  sendSocket(webSocket, { type: 'error', message });
+function socketError(webSocket, message, code) {
+  sendSocket(webSocket, { type: 'error', message, code });
 }
 
 function assertSameOrigin(request) {
