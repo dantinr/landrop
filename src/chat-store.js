@@ -2,10 +2,11 @@
 
 const path = require('node:path');
 const { JsonStore } = require('./json-store');
+const { DEFAULT_CHAT_HISTORY_LIMIT, validateChatHistoryLimit } = require('./config');
 
 class ChatStore {
-  constructor(dataDir, limit = 200) {
-    this.limit = limit;
+  constructor(dataDir, limit = DEFAULT_CHAT_HISTORY_LIMIT) {
+    this.limit = validateChatHistoryLimit(limit);
     this.messages = [];
     this.store = new JsonStore(path.join(dataDir, 'messages.json'), []);
     this.mutationQueue = Promise.resolve();
@@ -13,9 +14,13 @@ class ChatStore {
 
   async init() {
     const stored = await this.store.read();
-    this.messages = Array.isArray(stored)
+    const messages = Array.isArray(stored)
       ? stored.filter(isStoredMessage).slice(-this.limit)
       : [];
+    if (!Array.isArray(stored) || messages.length !== stored.length) {
+      await this.store.write(messages);
+    }
+    this.messages = messages;
   }
 
   list() {

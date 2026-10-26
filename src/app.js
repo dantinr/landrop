@@ -39,7 +39,7 @@ async function createLanDropServer(options = {}) {
   const trustLoopbackProxy = options.trustLoopbackProxy === true;
   const dailyMessageLimit = new DailyMessageLimit(dataDir, options.dailyMessageLimit, options.now);
   const fileStore = new FileStore(dataDir);
-  const chatStore = new ChatStore(dataDir);
+  const chatStore = new ChatStore(dataDir, options.chatHistoryLimit);
   await Promise.all([fileStore.init(), chatStore.init(), dailyMessageLimit.init()]);
 
   const clients = new Set();
@@ -82,6 +82,7 @@ async function createLanDropServer(options = {}) {
           serverName,
           onlineCount: readyClients(clients).length,
           maxUploadBytes: MAX_UPLOAD_BYTES,
+          chatHistoryLimit: chatStore.limit,
           availableBytes: await fileStore.availableBytes(),
         });
       }
@@ -215,6 +216,7 @@ async function createLanDropServer(options = {}) {
       type: 'welcome',
       clientId: client.id,
       chatQuota: dailyMessageLimit.status(client.id),
+      chatHistoryLimit: chatStore.limit,
       history: chatStore.list(),
       files: fileStore.list().map(publicFile),
       uploads: publicActiveUploads(activeUploads),

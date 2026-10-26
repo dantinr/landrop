@@ -592,16 +592,22 @@ test('每日消息上限配置默认不限，支持正整数，非法配置会�
   const configPath = path.join(configDir, 'config.json');
   context.after(() => fs.rm(configDir, { recursive: true, force: true }));
 
-  assert.deepEqual(await readConfig(configPath), { dailyMessageLimit: 0 });
-  for (const config of [{}, { dailyMessageLimit: 0 }, { dailyMessageLimit: 100 }]) {
+  assert.deepEqual(await readConfig(configPath), { dailyMessageLimit: 0, chatHistoryLimit: 20 });
+  for (const config of [{}, { dailyMessageLimit: 0 }, { dailyMessageLimit: 100, chatHistoryLimit: 5 }]) {
     await fs.writeFile(configPath, `\uFEFF${JSON.stringify(config)}`);
     assert.deepEqual(await readConfig(configPath), {
       dailyMessageLimit: config.dailyMessageLimit ?? 0,
+      chatHistoryLimit: config.chatHistoryLimit ?? 20,
     });
   }
   for (const value of [-1, 1.5, '100', null, true, Number.MAX_SAFE_INTEGER + 1]) {
     await fs.writeFile(configPath, JSON.stringify({ dailyMessageLimit: value }));
     await assert.rejects(readConfig(configPath), /dailyMessageLimit 必须是非负整数/u);
+  }
+  for (const value of [0, -1, 1.5, '20', null, true, Number.MAX_SAFE_INTEGER + 1]) {
+    await fs.writeFile(configPath, JSON.stringify({ chatHistoryLimit: value }));
+    await assert.rejects(readConfig(configPath), /chatHistoryLimit 必须是正整数/u);
+    await assert.rejects(createLanDropServer({ dataDir: configDir, chatHistoryLimit: value }), /chatHistoryLimit 必须是正整数/u);
   }
   for (const config of [null, [], 100, 'invalid']) {
     await fs.writeFile(configPath, JSON.stringify(config));
@@ -710,8 +716,8 @@ test('默认可连续发送超过 100 条，历史淘汰及随后启用上限不
     await client.inbox.waitFor((event) => event.message?.text === `不限消息 ${index}`);
   }
   const history = JSON.parse(await fs.readFile(path.join(dataDir, 'messages.json'), 'utf8'));
-  assert.equal(history.length, 200);
-  assert.equal(history[0].text, '不限消息 2');
+  assert.equal(history.length, 20);
+  assert.equal(history[0].text, '不限消息 182');
   const counts = JSON.parse(await fs.readFile(path.join(dataDir, 'chat-usage.json'), 'utf8'));
   assert.equal(new Map(counts.counts).get(client.clientId), 201);
 
@@ -720,6 +726,8 @@ test('默认可连续发送超过 100 条，历史淘汰及随后启用上限不
   const restarted = await app.start();
   const reconnected = await connectClient(`http://127.0.0.1:${restarted.port}`, '仍是同设备', client.clientId);
   sockets.push(reconnected.socket);
+  assert.equal(reconnected.welcome.history.length, 20);
+  assert.equal(reconnected.welcome.history[0].text, '不限消息 182');
   reconnected.socket.send(JSON.stringify({ type: 'chat', text: '启用上限后被拒绝' }));
   assert.equal((await reconnected.inbox.waitFor((event) => event.type === 'error')).code, 'DAILY_MESSAGE_LIMIT');
 });
@@ -777,6 +785,96 @@ test('已部署版本的当天计数可继续使用，查询额度会在北京�
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, 'chat-usage.json'), 'utf8')), {
     date: '2026-10-27', counts: [['legacy-device', 1]],
   });
+});
+
+test('启动即将旧聊天记录清理到最近 20 条，磁盘、重连和重启结果一致', async (context) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-history-startup-'));
+  const messagesPath = path.join(dataDir, 'messages.json');
+  const original = Array.from({ length: 25 }, (_, index) => ({
+    id: `legacy-message-${index + 1}`, kind: 'text',
+    sender: { id: 'legacy-device', name: '旧设备', ip: '192.168.1.10' },
+    text: `旧记录 ${index + 1}`, createdAt: '2026-10-26T00:00:00.000Z',
+  }));
+  await fs.writeFile(messagesPath, JSON.stringify([...original, { kind: 'online' }]));
+  const options = { host: '127.0.0.1', port: 0, dataDir };
+  let app = await createLanDropServer(options);
+  const sockets = [];
+  context.after(async () => {
+    for (const socket of sockets) socket.terminate();
+    await app.stop();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  });
+  const expected = original.slice(-20);
+  assert.deepEqual(JSON.parse(await fs.readFile(messagesPath, 'utf8')), expected);
+  const address = await app.start();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const first = await connectClient(baseUrl, '读取设备', 'device-history-reader');
+  sockets.push(first.socket);
+  assert.equal(first.welcome.chatHistoryLimit, 20);
+  assert.deepEqual(first.welcome.history, expected);
+  assert.equal((await (await fetch(`${baseUrl}/api/status`)).json()).chatHistoryLimit, 20);
+
+  await app.stop();
+  app = await createLanDropServer(options);
+  const restarted = await app.start();
+  const second = await connectClient(`http://127.0.0.1:${restarted.port}`, '重连设备', first.clientId);
+  sockets.push(second.socket);
+  assert.deepEqual(second.welcome.history, expected);
+  assert.deepEqual(JSON.parse(await fs.readFile(messagesPath, 'utf8')), expected);
+});
+
+test('自定义保留条数包含文字、文件及图片，并发发送按顺序淘汰且每日额度继续累计', async (context) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-history-window-'));
+  const app = await createLanDropServer({ host: '127.0.0.1', port: 0, dataDir, chatHistoryLimit: 3 });
+  const address = await app.start();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const sockets = [];
+  context.after(async () => {
+    for (const socket of sockets) socket.terminate();
+    await app.stop();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  });
+  const sender = await connectClient(baseUrl, '发送设备', 'device-window-sender');
+  const observer = await connectClient(baseUrl, '观察设备', 'device-window-observer');
+  sockets.push(sender.socket, observer.socket);
+  assert.equal(sender.welcome.chatHistoryLimit, 3);
+  sender.socket.send(JSON.stringify({ type: 'chat', text: '消息 1' }));
+  await observer.inbox.waitFor((event) => event.message?.text === '消息 1');
+  const uploads = [];
+  for (const [name, mime] of [['文件 2.txt', 'text/plain'], ['图片 3.png', 'image/png']]) {
+    const response = await fetch(`${baseUrl}/api/files`, {
+      method: 'POST',
+      headers: {
+        Origin: baseUrl, 'X-Client-Id': sender.clientId,
+        'X-File-Name': Buffer.from(name).toString('base64url'), 'X-File-Type': mime,
+      },
+      body: 'history retention test',
+    });
+    assert.equal(response.status, 201);
+    uploads.push(await response.json());
+    await observer.inbox.waitFor((event) => event.message?.file?.name === name);
+  }
+  const messagesPath = path.join(dataDir, 'messages.json');
+  assert.deepEqual(JSON.parse(await fs.readFile(messagesPath, 'utf8')).map((message) => message.kind), ['text', 'file', 'file']);
+  for (let index = 4; index <= 7; index += 1) {
+    sender.socket.send(JSON.stringify({ type: 'chat', text: `消息 ${index}` }));
+  }
+  for (let index = 4; index <= 7; index += 1) {
+    await observer.inbox.waitFor((event) => event.message?.text === `消息 ${index}`);
+  }
+  const stored = JSON.parse(await fs.readFile(messagesPath, 'utf8'));
+  assert.deepEqual(stored.map((message) => message.text), ['消息 5', '消息 6', '消息 7']);
+  const late = await connectClient(baseUrl, '后来设备', 'device-window-late');
+  sockets.push(late.socket);
+  assert.deepEqual(late.welcome.history, stored);
+  const counts = JSON.parse(await fs.readFile(path.join(dataDir, 'chat-usage.json'), 'utf8'));
+  assert.equal(new Map(counts.counts).get(sender.clientId), 7);
+  assert.equal((await (await fetch(`${baseUrl}/api/files`)).json()).files.length, 2);
+  for (const upload of uploads) {
+    const download = await fetch(`${baseUrl}${upload.file.downloadUrl}`);
+    assert.equal(download.status, 200);
+    assert.equal(await download.text(), 'history retention test');
+  }
 });
 
 function connectClient(baseUrl, name, deviceId = `device-${Date.now()}-${Math.random()}`, headers = {}) {

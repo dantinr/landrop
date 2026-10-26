@@ -1,3 +1,4 @@
 {
-  "dailyMessageLimit": 0
+  "dailyMessageLimit": 0,
+  "chatHistoryLimit": 20
 }

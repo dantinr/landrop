@@ -28,6 +28,7 @@ async function main() {
     host: process.env.HOST || '0.0.0.0',
     dataDir,
     dailyMessageLimit: config.dailyMessageLimit,
+    chatHistoryLimit: config.chatHistoryLimit,
     trustLoopbackProxy: process.env.LANDROP_TRUST_PROXY === 'loopback',
   });
 
@@ -44,6 +45,7 @@ async function main() {
   console.log('  每日发送:  ' + (config.dailyMessageLimit === 0
     ? '不限'
     : `每设备 ${config.dailyMessageLimit} 条（文字、文件和图片合计）`));
+  console.log(`  聊天记录:  仅保留最近 ${config.chatHistoryLimit} 条`);
   console.log('');
   console.log('  按 Ctrl+C 停止服务。');
 

@@ -11,6 +11,7 @@ const elements = {
   copyAddress: document.querySelector('#copy-address'),
   serverName: document.querySelector('#server-name'),
   chatQuota: document.querySelector('#chat-quota'),
+  historyPolicy: document.querySelector('#history-policy'),
   clearView: document.querySelector('#clear-view'),
   messages: document.querySelector('#messages'),
   chatEmpty: document.querySelector('#chat-empty'),
@@ -47,6 +48,7 @@ const state = {
   clientId: null,
   connected: false,
   chatQuota: null,
+  chatHistoryLimit: 20,
   quotaTimer: null,
   reconnectDelay: 800,
   reconnectTimer: null,
@@ -192,6 +194,9 @@ function handleSocketPayload(payload) {
     state.clientId = payload.clientId;
     state.connected = true;
     state.reconnectDelay = 800;
+    state.chatHistoryLimit = Number.isSafeInteger(payload.chatHistoryLimit) && payload.chatHistoryLimit > 0
+      ? payload.chatHistoryLimit : 20;
+    elements.historyPolicy.textContent = `仅保留最近 ${state.chatHistoryLimit} 条聊天记录`;
     updateChatQuota(payload.chatQuota);
     elements.serverName.textContent = `${payload.serverName || '局域网'} · 公共房间`;
     renderHistory(payload.history || []);
@@ -428,6 +433,7 @@ function appendMessage(message, animateScroll = true) {
     row.append(avatar, content);
   }
   elements.messages.append(row);
+  trimChatHistory();
   updateChatEmptyState();
   refreshIcons();
 
@@ -435,6 +441,28 @@ function appendMessage(message, animateScroll = true) {
     requestAnimationFrame(() => {
       elements.messages.scrollTop = elements.messages.scrollHeight;
     });
+  }
+}
+
+function trimChatHistory() {
+  const rows = [...elements.messages.querySelectorAll('.message-row')];
+  const messages = rows.filter((row) => !row.classList.contains('system-message-row'));
+  const notices = rows.filter((row) => row.classList.contains('system-message-row'));
+  const expired = new Set([
+    ...messages.slice(0, -state.chatHistoryLimit),
+    ...notices.slice(0, -state.chatHistoryLimit),
+  ]);
+  // Discard notices preceding an expired message as that part of the conversation leaves the window.
+  if (messages.length > state.chatHistoryLimit) {
+    const oldestRetained = messages[messages.length - state.chatHistoryLimit];
+    for (const row of rows) {
+      if (row === oldestRetained) break;
+      expired.add(row);
+    }
+  }
+  for (const row of expired) {
+    state.messageIds.delete(row.dataset.messageId);
+    row.remove();
   }
 }
 

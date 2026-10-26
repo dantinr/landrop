@@ -3,9 +3,18 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 
+const DEFAULT_CHAT_HISTORY_LIMIT = 20;
+
 function validateDailyMessageLimit(value) {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error('dailyMessageLimit 必须是非负整数，0 表示不限');
+  }
+  return value;
+}
+
+function validateChatHistoryLimit(value) {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error('chatHistoryLimit 必须是正整数');
   }
   return value;
 }
@@ -15,7 +24,9 @@ async function readConfig(filePath = path.join(__dirname, '..', 'config.json')) 
   try {
     source = await fs.readFile(filePath, 'utf8');
   } catch (error) {
-    if (error.code === 'ENOENT') return { dailyMessageLimit: 0 };
+    if (error.code === 'ENOENT') {
+      return { dailyMessageLimit: 0, chatHistoryLimit: DEFAULT_CHAT_HISTORY_LIMIT };
+    }
     throw error;
   }
 
@@ -33,7 +44,10 @@ async function readConfig(filePath = path.join(__dirname, '..', 'config.json')) 
     dailyMessageLimit: validateDailyMessageLimit(
       Object.hasOwn(config, 'dailyMessageLimit') ? config.dailyMessageLimit : 0,
     ),
+    chatHistoryLimit: validateChatHistoryLimit(
+      Object.hasOwn(config, 'chatHistoryLimit') ? config.chatHistoryLimit : DEFAULT_CHAT_HISTORY_LIMIT,
+    ),
   };
 }
 
-module.exports = { readConfig, validateDailyMessageLimit };
+module.exports = { DEFAULT_CHAT_HISTORY_LIMIT, readConfig, validateChatHistoryLimit, validateDailyMessageLimit };
