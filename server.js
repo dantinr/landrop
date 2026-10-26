@@ -29,6 +29,8 @@ async function main() {
     dataDir,
     dailyMessageLimit: config.dailyMessageLimit,
     chatHistoryLimit: config.chatHistoryLimit,
+    chatStorage: config.chatStorage,
+    redis: config.redis,
     trustLoopbackProxy: process.env.LANDROP_TRUST_PROXY === 'loopback',
   });
 
@@ -46,6 +48,7 @@ async function main() {
     ? '不限'
     : `每设备 ${config.dailyMessageLimit} 条（文字、文件和图片合计）`));
   console.log(`  聊天记录:  仅保留最近 ${config.chatHistoryLimit} 条`);
+  console.log(`  聊天存储:  ${config.chatStorage === 'redis' ? 'Redis' : 'JSON 文件'}`);
   console.log('');
   console.log('  按 Ctrl+C 停止服务。');
 

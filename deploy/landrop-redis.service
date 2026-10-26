@@ -1,0 +1,22 @@
+[Unit]
+Description=LanDrop memory-only chat Redis
+After=network.target
+
+[Service]
+Type=simple
+User=redis
+Group=redis
+ExecStart=/usr/bin/redis-server /etc/redis/landrop.conf --daemonize no
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/run/landrop-redis
+RuntimeDirectory=landrop-redis
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

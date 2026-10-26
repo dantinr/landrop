@@ -11,6 +11,8 @@ const test = require('node:test');
 const { WebSocket } = require('ws');
 const { createLanDropServer } = require('../src/app');
 const { ChatStore } = require('../src/chat-store');
+const { createClient } = require('@redis/client');
+const { createChatStorage } = require('../src/redis-chat-store');
 const { readConfig } = require('../src/config');
 const { DailyMessageLimit, messageDay } = require('../src/daily-message-limit');
 const { FileStore } = require('../src/file-store');
@@ -664,12 +666,14 @@ test('每日消息上限配置默认不限，支持正整数，非法配置会�
   const configPath = path.join(configDir, 'config.json');
   context.after(() => fs.rm(configDir, { recursive: true, force: true }));
 
-  assert.deepEqual(await readConfig(configPath), { dailyMessageLimit: 0, chatHistoryLimit: 20 });
+  const storageDefaults = { chatStorage: 'json', redis: { url: process.env.LANDROP_REDIS_URL || 'redis://127.0.0.1:6380', keyPrefix: 'landrop:chat:' } };
+  assert.deepEqual(await readConfig(configPath), { dailyMessageLimit: 0, chatHistoryLimit: 20, ...storageDefaults });
   for (const config of [{}, { dailyMessageLimit: 0 }, { dailyMessageLimit: 100, chatHistoryLimit: 5 }]) {
     await fs.writeFile(configPath, `\uFEFF${JSON.stringify(config)}`);
     assert.deepEqual(await readConfig(configPath), {
       dailyMessageLimit: config.dailyMessageLimit ?? 0,
       chatHistoryLimit: config.chatHistoryLimit ?? 20,
+      ...storageDefaults,
     });
   }
   for (const value of [-1, 1.5, '100', null, true, Number.MAX_SAFE_INTEGER + 1]) {
@@ -1337,6 +1341,174 @@ test('删除聊天记录与新增写入排队，写盘失败不改变内存且�
   assert.deepEqual(removed, [first.id, queued.id]);
   assert.deepEqual(store.list(), [retained]);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, 'messages.json'), 'utf8')), [retained]);
+});
+
+test('Redis 配置严格校验连接地址、前缀和存储类型，错误不暴露密码', async (context) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-redis-config-'));
+  context.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'config.json');
+  await fs.writeFile(file, JSON.stringify({ chatStorage: 'redis', redisUrl: 'rediss://user:secret@localhost:6380/2', redisKeyPrefix: 'custom:chat:' }));
+  const configured = await readConfig(file);
+  assert.equal(configured.chatStorage, 'redis');
+  assert.equal(configured.redis.keyPrefix, 'custom:chat:');
+  assert.equal(configured.redis.url, process.env.LANDROP_REDIS_URL || 'rediss://user:secret@localhost:6380/2');
+  for (const value of ['memory', null, 1, {}]) {
+    await fs.writeFile(file, JSON.stringify({ chatStorage: value }));
+    await assert.rejects(readConfig(file), /chatStorage 必须是 json 或 redis/u);
+  }
+  const { validateRedisOptions } = require('../src/config');
+  for (const url of ['http://user:secret@localhost', 'redis://localhost/abc', 'redis://localhost?secret=password', null, 1]) {
+    assert.throws(() => validateRedisOptions(url), error => !error.message.includes('secret') && /redisUrl/u.test(error.message));
+  }
+  for (const prefix of ['', '*', 'space prefix', null, 100]) assert.throws(() => validateRedisOptions(undefined, prefix), /redisKeyPrefix/u);
+});
+
+test('Redis 无法连接时启动失败，不回退写入 JSON 或暴露凭证', async (context) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-redis-unavailable-'));
+  context.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const unused = require('node:net').createServer();
+  await new Promise(resolve => unused.listen(0, '127.0.0.1', resolve));
+  const port = unused.address().port;
+  await new Promise(resolve => unused.close(resolve));
+  await assert.rejects(createLanDropServer({ dataDir: directory, chatStorage: 'redis', redis: { url: `redis://private:never-log-this@127.0.0.1:${port}` } }), error => {
+    assert.match(error.message, /无法连接聊天 Redis/u);
+    assert.doesNotMatch(error.message, /never-log-this|private/u);
+    return true;
+  });
+  await assert.rejects(fs.stat(path.join(directory, 'messages.json')), { code: 'ENOENT' });
+});
+
+const redisTestOptions = { skip: !process.env.LANDROP_TEST_REDIS_URL };
+
+async function redisFixture(context) {
+  const client = createClient({ url: process.env.LANDROP_TEST_REDIS_URL, socket: { reconnectStrategy: false } });
+  client.on('error', () => {});
+  await client.connect();
+  const keyPrefix = `landrop-test:${crypto.randomUUID()}:`;
+  context.after(async () => {
+    try {
+      for await (const keys of client.scanIterator({ MATCH: `${keyPrefix}*`, COUNT: 100 })) {
+        if (keys.length) await client.del(keys);
+      }
+    } finally { client.destroy(); }
+  });
+  return { client, redis: { url: process.env.LANDROP_TEST_REDIS_URL, keyPrefix }, key: id => `${keyPrefix}${id || 'public'}` };
+}
+
+test('Redis 迁移旧 JSON 后只存内存，原子保留条数、并发删除、清空后不复活历史', redisTestOptions, async (context) => {
+  const fixture = await redisFixture(context);
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-redis-store-'));
+  context.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const message = (id, sender = 'sender-a') => ({ id, kind: 'text', text: `private body ${id}`, sender: { id: sender, name: sender, ip: '127.0.0.1' }, createdAt: new Date().toISOString() });
+  await fs.writeFile(path.join(directory, 'messages.json'), JSON.stringify([message('1'), message('2'), message('3'), message('4')]));
+  let storage = await createChatStorage({ chatStorage: 'redis', redis: fixture.redis });
+  context.after(() => storage.close());
+  let store = storage.create(directory, 3, '');
+  await store.init();
+  assert.deepEqual((await store.list()).map(row => row.id), ['2', '3', '4']);
+  await assert.rejects(fs.stat(path.join(directory, 'messages.json')), { code: 'ENOENT' });
+  await Promise.all([store.add(message('5', 'sender-b')), store.add(message('6')), store.removeBySender('sender-a')]);
+  assert.deepEqual((await store.list()).map(row => row.id), ['5']);
+  storage.close();
+  storage = await createChatStorage({ chatStorage: 'redis', redis: fixture.redis });
+  store = storage.create(directory, 3, '');
+  await store.init();
+  assert.deepEqual((await store.list()).map(row => row.id), ['5'], '仅重启程序仍使用 Redis 中的记录');
+  await fixture.client.del(fixture.key(''));
+  assert.deepEqual(await store.list(), [], 'Redis 中清空后不使用内存或旧 JSON 副本');
+  await store.add(message('7'));
+  assert.deepEqual((await store.list()).map(row => row.id), ['7']);
+  await fixture.client.set(fixture.key(''), 'wrong data type');
+  await assert.rejects(store.add(message('never-log-private')), error => error.code === 'CHAT_STORAGE_UNAVAILABLE' && !error.message.includes('private'));
+  await fixture.client.del(fixture.key(''));
+  await store.add(message('8'));
+  assert.deepEqual((await store.list()).map(row => row.id), ['8'], '失败后写入队列仍可恢复');
+  await assert.rejects(fs.stat(path.join(directory, 'messages.json')), { code: 'ENOENT' });
+});
+
+test('Redis 迁移失败保留原始 JSON，已有 Redis 记录不会被旧磁盘副本覆盖', redisTestOptions, async (context) => {
+  const fixture = await redisFixture(context);
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-redis-migrate-'));
+  context.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const message = { id: 'existing', kind: 'text', text: 'private migration text', createdAt: new Date().toISOString() };
+  const legacyPath = path.join(directory, 'messages.json');
+  await fs.writeFile(legacyPath, JSON.stringify([message]));
+  const storage = await createChatStorage({ chatStorage: 'redis', redis: fixture.redis });
+  context.after(() => storage.close());
+  await fixture.client.set(fixture.key(''), 'wrong type');
+  const store = storage.create(directory, 20, '');
+  await assert.rejects(store.init(), { code: 'CHAT_STORAGE_UNAVAILABLE' });
+  assert.deepEqual(JSON.parse(await fs.readFile(legacyPath, 'utf8')), [message]);
+  await fixture.client.del(fixture.key(''));
+  await fixture.client.rPush(fixture.key(''), JSON.stringify({ ...message, id: 'redis-newer' }));
+  await store.init();
+  assert.deepEqual((await store.list()).map(row => row.id), ['redis-newer']);
+  await assert.rejects(fs.stat(legacyPath), { code: 'ENOENT' });
+});
+
+test('Redis 公共与专有房间隔离，文字图片文件受保留限制，离开同步清理且销毁删键', redisTestOptions, async (context) => {
+  const redis = await redisFixture(context);
+  const fixture = await roomFixture(context, { chatStorage: 'redis', redis: redis.redis, chatHistoryLimit: 3 });
+  const { baseUrl, sockets, dataDir } = fixture;
+  const created = await createTestRoom(baseUrl, 'Redis 房间', 3);
+  const owner = await connectClient(baseUrl, 'Redis 房主', 'device-redis-owner', {}, { ...created.room, ownerToken: created.ownerToken });
+  const sender = await connectClient(baseUrl, 'Redis 成员', 'device-redis-sender', {}, created.room);
+  const outside = await connectClient(baseUrl, '公共成员', 'device-redis-outside');
+  sockets.push(owner.socket, sender.socket, outside.socket);
+  outside.socket.send(JSON.stringify({ type: 'chat', text: '公共消息应保留' }));
+  await outside.inbox.waitFor(event => event.message?.text === '公共消息应保留');
+  sender.socket.send(JSON.stringify({ type: 'chat', text: '会被条数淘汰' }));
+  await owner.inbox.waitFor(event => event.message?.text === '会被条数淘汰');
+  const own = [];
+  for (const [name, mime] of [['example.txt', 'text/plain'], ['example.png', 'image/png']]) {
+    const response = await fetch(`${baseUrl}/api/rooms/${created.room.id}/files`, {
+      method: 'POST', headers: { Origin: baseUrl, 'X-Room-Session': sender.welcome.roomSession, 'X-File-Name': Buffer.from(name).toString('base64url'), 'X-File-Type': mime }, body: 'redis-file-content',
+    });
+    assert.equal(response.status, 201);
+    own.push((await response.json()).message.id);
+  }
+  owner.socket.send(JSON.stringify({ type: 'chat', text: '房主消息保留' }));
+  const retained = (await owner.inbox.waitFor(event => event.message?.text === '房主消息保留')).message;
+  assert.equal(await redis.client.lLen(redis.key(created.room.id)), 3);
+  const tab = await connectClient(baseUrl, '成员另一标签', sender.clientId, {}, created.room);
+  sockets.push(tab.socket);
+  sender.socket.close();
+  await owner.inbox.waitFor(event => event.type === 'presence' && event.count === 2);
+  assert.equal(await redis.client.lLen(redis.key(created.room.id)), 3);
+  tab.socket.close();
+  const removed = await owner.inbox.waitFor(event => event.type === 'messagesRemoved');
+  assert.deepEqual(new Set(removed.messageIds), new Set(own));
+  assert.deepEqual((await redis.client.lRange(redis.key(created.room.id), 0, -1)).map(JSON.parse), [retained]);
+  assert.equal(await redis.client.lLen(redis.key('')), 1);
+  for (const directory of [dataDir, path.join(dataDir, 'rooms', created.room.id)]) {
+    await assert.rejects(fs.stat(path.join(directory, 'messages.json')), { code: 'ENOENT' });
+  }
+  const again = await connectClient(baseUrl, '重连成员', sender.clientId, {}, created.room);
+  sockets.push(again.socket);
+  assert.deepEqual(again.welcome.history, [retained]);
+  assert.equal(again.welcome.files.length, 2);
+  await fixture.restart();
+  const restarted = await connectClient(fixture.baseUrl, '程序重启后', sender.clientId, {}, created.room);
+  sockets.push(restarted.socket);
+  assert.deepEqual(restarted.welcome.history, [retained]);
+  await redis.client.del(redis.key(created.room.id));
+  const empty = await connectClient(fixture.baseUrl, 'Redis 清空后', 'device-redis-empty', {}, created.room);
+  sockets.push(empty.socket);
+  assert.deepEqual(empty.welcome.history, [], '程序仍在运行也不能下发 Redis 已清除的旧消息');
+  await redis.client.set(redis.key(created.room.id), 'wrong type');
+  restarted.socket.send(JSON.stringify({ type: 'chat', text: '不应记录到日志的正文' }));
+  assert.equal((await restarted.inbox.waitFor(event => event.type === 'error')).code, 'CHAT_STORAGE_UNAVAILABLE');
+  const failedUpload = await fetch(`${fixture.baseUrl}/api/rooms/${created.room.id}/files`, {
+    method: 'POST', headers: { Origin: fixture.baseUrl, 'X-Room-Session': restarted.welcome.roomSession, 'X-File-Name': Buffer.from('error.png').toString('base64url'), 'X-File-Type': 'image/png' }, body: 'private-body-must-not-appear-in-errors',
+  });
+  assert.equal(failedUpload.status, 503);
+  assert.deepEqual(await failedUpload.json(), { error: 'CHAT_STORAGE_UNAVAILABLE', message: '聊天存储暂不可用，请稍后重试' });
+  await redis.client.del(redis.key(created.room.id));
+  const deleted = await fetch(`${fixture.baseUrl}/api/rooms/${created.room.id}`, { method: 'DELETE', headers: { Origin: fixture.baseUrl, Authorization: `Bearer ${created.ownerToken}` } });
+  assert.equal(deleted.status, 200);
+  assert.equal(await redis.client.exists(redis.key(created.room.id)), 0);
+  assert.equal(await redis.client.lLen(redis.key('')), 1);
+  assert.equal((await fetch(`${fixture.baseUrl}/api/rooms/${created.room.id}`)).status, 404);
 });
 
 async function roomFixture(context, options = {}) {

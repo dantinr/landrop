@@ -1,4 +1,7 @@
 {
   "dailyMessageLimit": 0,
-  "chatHistoryLimit": 20
+  "chatHistoryLimit": 20,
+  "chatStorage": "json",
+  "redisUrl": "redis://127.0.0.1:6380",
+  "redisKeyPrefix": "landrop:chat:"
 }

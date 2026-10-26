@@ -7,6 +7,7 @@
 | 组件 | 实际版本 | 用途 | 许可证 | 来源与分发方式 |
 | --- | --- | --- | --- | --- |
 | ws | 8.21.3 | Node.js WebSocket 服务端 | MIT | [websockets/ws](https://github.com/websockets/ws)；由 npm 根据 `package-lock.json` 安装，完整许可证见 [licenses/ws.LICENSE.txt](licenses/ws.LICENSE.txt) |
+| @redis/client | 6.3.0 | 官方 Node.js Redis 客户端，用于可选的聊天历史存储；无必装传递依赖 | MIT | [redis/node-redis](https://github.com/redis/node-redis)；由 npm 根据 `package-lock.json` 安装，完整许可证见 [licenses/redis-client.LICENSE.txt](licenses/redis-client.LICENSE.txt) |
 | Lucide | 1.44.0 | 浏览器界面图标 | ISC；其中 Feather 衍生图标为 MIT | [lucide-icons/lucide](https://github.com/lucide-icons/lucide)；压缩脚本随仓库分发，完整许可证见 [wwwroot/vendor/lucide.LICENSE.txt](wwwroot/vendor/lucide.LICENSE.txt) |
 
 ## 开发与运行环境

@@ -62,4 +62,4 @@ function isStoredMessage(message) {
   );
 }
 
-module.exports = { ChatStore };
+module.exports = { ChatStore, isStoredMessage };

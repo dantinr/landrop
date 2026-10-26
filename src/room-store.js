@@ -11,10 +11,11 @@ const { HttpError } = require('./validation');
 const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{32}$/u;
 
 class RoomStore {
-  constructor(dataDir, chatHistoryLimit) {
+  constructor(dataDir, chatHistoryLimit, chatStorage) {
     this.dataDir = dataDir;
     this.roomsDir = path.join(dataDir, 'rooms');
     this.chatHistoryLimit = chatHistoryLimit;
+    this.chatStorage = chatStorage || { create: (directory, limit) => new ChatStore(directory, limit), clear: async () => {} };
     this.rooms = new Map();
   }
 
@@ -27,6 +28,7 @@ class RoomStore {
       const metadata = await new JsonStore(path.join(directory, 'room.json'), null).read();
       if (!metadata) continue;
       if (metadata.destroyed) {
+        await this.chatStorage.clear(entry.name);
         await fs.rm(directory, { recursive: true, force: true });
         continue;
       }
@@ -46,7 +48,7 @@ class RoomStore {
       responses: new Map(), uploadBroadcastTimer: null,
       metadata: new JsonStore(path.join(directory, 'room.json'), null),
       fileStore: new FileStore(directory),
-      chatStore: new ChatStore(directory, this.chatHistoryLimit),
+      chatStore: this.chatStorage.create(directory, this.chatHistoryLimit, metadata.id),
     };
     await Promise.all([room.fileStore.init(), room.chatStore.init()]);
     return room;
@@ -105,6 +107,7 @@ class RoomStore {
     }
     onDestroy(room);
     await Promise.allSettled([...room.operations]);
+    await this.chatStorage.clear(id);
     await fs.rm(room.directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     this.rooms.delete(id);
   }

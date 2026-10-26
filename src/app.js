@@ -11,6 +11,7 @@ const { remoteAddress } = require('./client-ip');
 const { DailyMessageLimit } = require('./daily-message-limit');
 const { FILE_ID_PATTERN, MAX_UPLOAD_BYTES } = require('./file-store');
 const { RoomStore, publicRoom } = require('./room-store');
+const { createChatStorage } = require('./redis-chat-store');
 const {
   HttpError,
   contentDisposition,
@@ -38,8 +39,14 @@ async function createLanDropServer(options = {}) {
   const serverName = options.serverName || os.hostname();
   const trustLoopbackProxy = options.trustLoopbackProxy === true;
   const dailyMessageLimit = new DailyMessageLimit(dataDir, options.dailyMessageLimit, options.now);
-  const rooms = new RoomStore(dataDir, options.chatHistoryLimit);
-  await Promise.all([rooms.init(), dailyMessageLimit.init()]);
+  const chatStorage = await createChatStorage(options);
+  const rooms = new RoomStore(dataDir, options.chatHistoryLimit, chatStorage);
+  try {
+    await Promise.all([rooms.init(), dailyMessageLimit.init()]);
+  } catch (error) {
+    chatStorage.close();
+    throw error;
+  }
   const fileStore = rooms.publicRoom.fileStore;
 
   const allClients = new Set();
@@ -206,9 +213,7 @@ async function createLanDropServer(options = {}) {
               createdAt: file.createdAt,
             };
 
-            await chatStore.add(message).catch((error) => {
-              console.error('保存聊天记录失败:', error.message);
-            });
+            await chatStore.add(message);
             rooms.assertActive(room);
             assertDeviceSession(deviceSession);
             broadcast(clients, { type: 'message', message });
@@ -300,6 +305,7 @@ async function createLanDropServer(options = {}) {
       while (room.pendingMessageRemovals.size > 0) {
         await Promise.allSettled([...room.pendingMessageRemovals]);
       }
+      const history = await chatStore.list();
       if (!clients.has(client) || webSocket.readyState !== WebSocket.OPEN) return;
       rooms.assertActive(room);
       sendSocket(webSocket, {
@@ -309,14 +315,14 @@ async function createLanDropServer(options = {}) {
         roomSession: room.id ? client.session : undefined,
         chatQuota: dailyMessageLimit.status(client.id),
         chatHistoryLimit: chatStore.limit,
-        history: chatStore.list(),
+        history,
         files: fileStore.list().map((file) => publicFile(file, room.id)),
         uploads: publicActiveUploads(activeUploads),
         serverName,
       });
       client.welcomed = true;
     };
-    welcome().catch(() => webSocket.close(4004, 'Room unavailable'));
+    welcome().catch(() => webSocket.close(1013, 'Chat storage unavailable'));
 
     webSocket.on('pong', () => {
       client.isAlive = true;
@@ -501,6 +507,7 @@ async function createLanDropServer(options = {}) {
         });
       }
       await Promise.allSettled(rooms.all().flatMap((room) => [...room.operations]));
+      chatStorage.close();
     },
   };
 }

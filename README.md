@@ -26,7 +26,7 @@ http://192.168.0.10:8787
 
 同一设备在该房间的最后一个已加入连接断开后，聊天区会显示 `用户名[IP] 已经离开房间...`。关闭其中一个标签页而其他标签页仍在线时不会提示；未加入房间的连接、销毁房间和停止服务也不会误报。离线提示只发给当前房间的成员，与上线提示一样，不保存到聊天历史，也不占用每日发送额度。
 
-成员离开后，该成员在当前房间发送的文字、图片卡片和文件卡片会从聊天历史中删除，并在其他成员页面上以约 0.65 秒的淡出消散效果同步移除。删除会写入 `messages.json`，刷新、重新进入或重启服务后也不会恢复。其他成员的消息以及该设备在其他房间的消息不受影响；清理不会恢复每日发送额度。系统开启“减少动态效果”时直接移除消息。
+成员离开后，该成员在当前房间发送的文字、图片卡片和文件卡片会从聊天历史中删除，并在其他成员页面上以约 0.65 秒的淡出消散效果同步移除。删除会同步到配置的 JSON 或 Redis 存储，刷新、重新进入或重启程序后也不会恢复。其他成员的消息以及该设备在其他房间的消息不受影响；清理不会恢复每日发送额度。系统开启“减少动态效果”时直接移除消息。
 
 离开时会中断该设备在当前房间的未完成上传，取消的上传按原规则退回额度；旧连接尚未完成的发送不能在重连后重新插入消息。已成功上传的文件本体仍保留，可通过桌面端“最近文件”下载；销毁房间才会删除房间里的文件本体。
 
@@ -55,7 +55,7 @@ http://192.168.0.10:8787
 - 上传文件：`data/uploads/`（物理文件名为 `原文件名[IP].扩展名`）
 - 上传中的临时文件：`data/incoming/`
 - 文件索引：`data/files.json`
-- 聊天记录：`data/messages.json`
+- 聊天记录：默认 `data/messages.json`，Redis 模式不再写入此文件
 - 每日发送计数：`data/chat-usage.json`
 - 专有聊天室：`data/rooms/<房间编号>/`（`room.json` 保存房间信息，其他聊天和文件目录结构与公共房间相同）
 
@@ -88,11 +88,39 @@ npm start -- --port=9000
 
 ## 聊天记录自动清理
 
-默认只保留最新 **20 条**聊天记录。第 21 条消息到来时，最早的一条会从 `data/messages.json` 和已连接页面中移除；重连、刷新或重启后也只会读取最新 20 条。启动服务时会立即清理超出上限的旧记录。
+默认只保留最新 **20 条**聊天记录。第 21 条消息到来时，最早的一条会从配置的存储和已连接页面中移除；重连、刷新或重启程序后也只会读取最新 20 条。启动服务时会立即清理超出上限的旧记录。
 
 `config.json` 中的 `chatHistoryLimit` 控制保留条数，必须是正整数；配置文件或该字段缺失时默认 `20`，修改后重启服务生效。例如改成 `50` 就保留最近 50 条。
 
 文字、文件卡片和图片卡片合计计算，上线和离线提示不占用聊天记录条数。成员离开时会提前清理其消息；其他记录按保留条数淘汰。卡片淘汰或清理后，上传文件仍保存在对应房间的 `uploads/`，可从桌面端的“最近文件”下载。每日发送额度独立累计，清理聊天记录不会恢复当日额度。
+
+## Redis 聊天存储
+
+本地快速启动默认使用 `chatStorage: "json"`。要改用 Redis，在 `config.json` 中设置：
+
+```json
+{
+  "dailyMessageLimit": 0,
+  "chatHistoryLimit": 20,
+  "chatStorage": "redis",
+  "redisUrl": "redis://127.0.0.1:6380",
+  "redisKeyPrefix": "landrop:chat:"
+}
+```
+
+生产密码使用环境变量 `LANDROP_REDIS_URL` 提供，它优先于 `redisUrl`，不要把含密码的地址提交到 Git。支持 `redis://` 和 TLS 的 `rediss://`，可在地址末尾指定数据库编号。使用官方 `@redis/client` 处理认证、协议和重连。
+
+公共房间保存在 `landrop:chat:public`，专有房间保存在 `landrop:chat:<房间ID>`。每个键是独立的 Redis List，文字、文件和图片卡片合计保留最近配置条数；追加/裁剪及按发送者删除使用 Lua 原子执行。房主销毁房间时一并删除 Redis 键。
+
+首次启用 Redis 会导入现有 `messages.json` 的最近记录；若键已存在，以 Redis 为准。迁移成功后删除原 JSON 文件，之后不再写消息 JSON；迁移失败保留原文件并中止启动。运行中 Redis 不可用时明确报错，不自动回退到磁盘，也不输出可能含聊天参数的原始 Redis 错误。
+
+**只存内存需要 Redis 服务端同时关闭 RDB 和 AOF。** 仓库提供专用的 `deploy/redis-landrop.conf` 和 `deploy/landrop-redis.service`，仅监听本机 `6380`，配置 `save ""`、`appendonly no` 并关闭慢查询参数记录。不要直接修改其他应用共享的 Redis。将配置安装为 `/etc/redis/landrop.conf`（`root:redis`、`0640`），在服务器上追加随机 `requirepass`，将服务安装至 `/etc/systemd/system/landrop-redis.service`。
+
+将含密码的 `LANDROP_REDIS_URL=redis://:<密码>@127.0.0.1:6380` 保存到 `/etc/landrop/redis.env`（`root:root`、`0600`），将 `deploy/landrop-redis.override.conf` 安装至 `/etc/systemd/system/landrop.service.d/redis.conf`。设置 `chatStorage: "redis"` 后，执行 `systemctl daemon-reload`、`systemctl enable --now landrop-redis`、`systemctl restart landrop`。
+
+仅重启邻传程序仍可读取 Redis 中的历史；重启内存型 Redis 后，刷新或重新进入房间看到空历史，旧消息不会从应用缓存或旧 JSON 恢复。房间元数据、上传文件、文件索引和每日发送计数仍保留在磁盘；文件索引包含上传者信息。
+
+运行 Redis 集成测试时，把 `LANDROP_TEST_REDIS_URL` 指向专门的测试实例，再执行 `npm test`。测试使用随机键前缀并只删除自身测试键；未配置测试地址时会明确跳过 Redis 集成测试。不要指向生产实例。
 
 ## Nginx 反向代理
 
@@ -110,7 +138,7 @@ npm start -- --port=9000
 
 `deploy/landrop.service` 用于 systemd 后台运行和开机启动：程序集中放在 `/var/www/landrop`，目录结构与本地一致，以 `landrop` 系统用户运行，仅监听 `127.0.0.1:8787`，由 Nginx 提供外部访问。服务器需安装 Node.js 20 或更高版本，并准备好生产依赖。
 
-上传文件和聊天记录统一保存在项目内的 `data/`：上传文件为 `/var/www/landrop/data/uploads/`，文件索引和聊天记录分别为 `data/files.json`、`data/messages.json`。`data/` 及其内容归 `landrop` 用户所有，更新程序时保留该目录。
+上传文件、文件索引、房间元数据和每日计数保存在项目内的 `data/`，归 `landrop` 用户所有，更新程序时保留该目录。聊天记录在 JSON 模式下位于 `data/messages.json` / `data/rooms/<id>/messages.json`；Redis 模式下改为 Redis List。
 
 `/etc/systemd/system/landrop.service` 符号链接到项目内的 `/var/www/landrop/deploy/landrop.service`。创建链接后，执行 `systemctl daemon-reload` 和 `systemctl enable --now landrop`；使用 `systemctl status landrop` 查看状态，`journalctl -u landrop -f` 查看日志。
 
