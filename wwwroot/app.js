@@ -299,6 +299,11 @@ function handleSocketPayload(payload) {
     return;
   }
 
+  if (payload.type === 'messagesRemoved') {
+    removeMessages(payload.messageIds);
+    return;
+  }
+
   if (payload.type === 'typing') {
     updateTypingUser(payload);
     return;
@@ -525,7 +530,7 @@ function appendMessage(message, animateScroll = true) {
 }
 
 function trimChatHistory() {
-  const rows = [...elements.messages.querySelectorAll('.message-row')];
+  const rows = [...elements.messages.querySelectorAll('.message-row:not(.message-removing)')];
   const messages = rows.filter((row) => !row.classList.contains('system-message-row'));
   const notices = rows.filter((row) => row.classList.contains('system-message-row'));
   const expired = new Set([
@@ -543,6 +548,32 @@ function trimChatHistory() {
   for (const row of expired) {
     state.messageIds.delete(row.dataset.messageId);
     row.remove();
+  }
+}
+
+function removeMessages(messageIds) {
+  if (!Array.isArray(messageIds)) return;
+  const removedIds = new Set(messageIds);
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  for (const row of elements.messages.querySelectorAll('.message-row:not(.system-message-row)')) {
+    if (!removedIds.has(row.dataset.messageId) || row.classList.contains('message-removing')) continue;
+    let timer;
+    const finish = () => {
+      clearTimeout(timer);
+      row.removeEventListener('animationend', finish);
+      state.messageIds.delete(row.dataset.messageId);
+      row.remove();
+      updateChatEmptyState();
+    };
+    if (reduceMotion) {
+      finish();
+      continue;
+    }
+    row.style.setProperty('--removed-height', `${row.offsetHeight}px`);
+    row.setAttribute('aria-hidden', 'true');
+    row.classList.add('message-removing');
+    row.addEventListener('animationend', finish, { once: true });
+    timer = setTimeout(finish, 750);
   }
 }
 

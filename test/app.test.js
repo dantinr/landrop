@@ -10,6 +10,7 @@ const { Readable } = require('node:stream');
 const test = require('node:test');
 const { WebSocket } = require('ws');
 const { createLanDropServer } = require('../src/app');
+const { ChatStore } = require('../src/chat-store');
 const { readConfig } = require('../src/config');
 const { DailyMessageLimit, messageDay } = require('../src/daily-message-limit');
 const { FileStore } = require('../src/file-store');
@@ -174,7 +175,7 @@ test('设备上线时广播提示，改名和同设备多标签页不重复，�
   assert.equal(reconnectNotice.message.sender.id, sender.clientId);
   assert.notEqual(reconnectNotice.message.id, firstNotice.message.id);
   assert.equal(notices.length, 2);
-  assert.deepEqual(reconnected.welcome.history.map((message) => message.kind), ['text', 'text']);
+  assert.deepEqual(reconnected.welcome.history, []);
 
   const unjoined = new WebSocket(`${baseUrl.replace('http:', 'ws:')}/ws`, { origin: baseUrl });
   sockets.push(unjoined);
@@ -185,7 +186,7 @@ test('设备上线时广播提示，改名和同设备多标签页不重复，�
   assert.equal(error.message, '请先设置昵称');
   assert.equal(notices.length, 2);
   const stored = JSON.parse(await fs.readFile(path.join(dataDir, 'messages.json'), 'utf8'));
-  assert.deepEqual(stored.map((message) => message.kind), ['text', 'text']);
+  assert.deepEqual(stored, []);
 });
 
 for (const privateRoom of [false, true]) {
@@ -232,7 +233,7 @@ for (const privateRoom of [false, true]) {
     assert.deepEqual(outsideDepartures, [], '离开提示不能广播到其他房间');
     const again = await connectClient(baseUrl, '重新进入', sender.clientId, {}, room);
     sockets.push(again.socket);
-    assert.deepEqual(again.welcome.history.map((message) => message.kind), ['text']);
+    assert.deepEqual(again.welcome.history, []);
     assert.equal(again.welcome.chatQuota.used, 1, '离开提示不能扣除发送额度');
     await observer.inbox.waitFor((event) => event.type === 'presence' && event.count === 2);
     const unjoinedUrl = new URL('/ws', baseUrl);
@@ -246,7 +247,7 @@ for (const privateRoom of [false, true]) {
     assert.equal(departures.length, 1, '没有加入房间的连接不应提示离开');
     const messagesPath = room.id
       ? path.join(dataDir, 'rooms', room.id, 'messages.json') : path.join(dataDir, 'messages.json');
-    assert.deepEqual(JSON.parse(await fs.readFile(messagesPath, 'utf8')).map((message) => message.kind), ['text']);
+    assert.deepEqual(JSON.parse(await fs.readFile(messagesPath, 'utf8')), []);
     if (privateRoom) {
       const response = await fetch(`${baseUrl}/api/rooms/${room.id}`, {
         method: 'DELETE', headers: { Origin: baseUrl, Authorization: `Bearer ${created.ownerToken}` },
@@ -1144,11 +1145,205 @@ test('销毁中断上传且不遗留文件，房间切换不能绕过每日额�
   assert.equal(new Map(usage.counts).get(uploader.clientId) || 0, 0);
 });
 
+for (const privateRoom of [false, true]) {
+  test(`${privateRoom ? '专有' : '公共'}房间同步删除离开者的文字与文件消息，保留他人消息且重连重启不恢复`, async (context) => {
+    const fixture = await roomFixture(context);
+    const { baseUrl, sockets, dataDir } = fixture;
+    const created = privateRoom ? await createTestRoom(baseUrl, '消息消失测试', 4) : null;
+    const room = created?.room || {};
+    const observer = await connectClient(baseUrl, '保留的成员', 'device-erase-observer', {}, room);
+    const sender = await connectClient(baseUrl, '离开的成员', 'device-erase-sender', {}, room);
+    sockets.push(observer.socket, sender.socket);
+    let outsideMessage;
+    const outsideRemovals = [];
+    if (privateRoom) {
+      const outside = await connectClient(baseUrl, '公共房间同一设备', sender.clientId);
+      sockets.push(outside.socket);
+      outside.socket.send(JSON.stringify({ type: 'chat', text: '同一设备在公共房间的消息保留' }));
+      outsideMessage = (await outside.inbox.waitFor((event) => event.message?.text === '同一设备在公共房间的消息保留')).message;
+      outside.socket.on('message', (buffer) => {
+        const event = JSON.parse(buffer);
+        if (event.type === 'messagesRemoved') outsideRemovals.push(event);
+      });
+    }
+    observer.socket.send(JSON.stringify({ type: 'chat', text: '其他人的消息应保留' }));
+    const retained = (await observer.inbox.waitFor((event) => event.message?.text === '其他人的消息应保留')).message;
+    sender.socket.send(JSON.stringify({ type: 'chat', text: '离开后删除的文字' }));
+    const ownText = (await observer.inbox.waitFor((event) => event.message?.text === '离开后删除的文字')).message;
+    const deletedIds = [ownText.id];
+    const prefix = room.id ? `/api/rooms/${room.id}` : '/api';
+    const uploads = [];
+    for (const [name, mimeType] of [['离开的文件.txt', 'text/plain'], ['离开的图片.png', 'image/png']]) {
+      const upload = await fetch(`${baseUrl}${prefix}/files`, {
+        method: 'POST', headers: {
+          Origin: baseUrl, 'X-Client-Id': sender.clientId,
+          'X-Room-Session': sender.welcome.roomSession || '',
+          'X-File-Name': Buffer.from(name).toString('base64url'), 'X-File-Type': mimeType,
+        }, body: 'file content stays available',
+      });
+      assert.equal(upload.status, 201);
+      const result = await upload.json();
+      uploads.push(result.file);
+      deletedIds.push(result.message.id);
+      await observer.inbox.waitFor((event) => event.message?.id === result.message.id);
+    }
+    const tab = await connectClient(baseUrl, '同设备标签页', sender.clientId, {}, room);
+    const peer = await connectClient(baseUrl, '另一位观察者', 'device-erase-peer', {}, room);
+    sockets.push(tab.socket, peer.socket);
+    await observer.inbox.waitFor((event) => event.type === 'presence' && event.count === (privateRoom ? 3 : 4));
+    const removedEvents = [];
+    observer.socket.on('message', (buffer) => {
+      const event = JSON.parse(buffer);
+      if (event.type === 'messagesRemoved') removedEvents.push(event);
+    });
+    // A member cannot delete arbitrary messages by sending a forged removal event.
+    sender.socket.send(JSON.stringify({ type: 'messagesRemoved', messageIds: [retained.id] }));
+    assert.equal((await sender.inbox.waitFor((event) => event.type === 'error')).code, 'UNKNOWN_SOCKET_MESSAGE');
+    sender.socket.terminate();
+    await observer.inbox.waitFor((event) => event.type === 'presence' && event.count === 3);
+    assert.deepEqual(removedEvents, [], '仍有同设备标签页时不能删除消息');
+    tab.socket.close();
+    const [firstRemoval, secondRemoval] = await Promise.all([
+      observer.inbox.waitFor((event) => event.type === 'messagesRemoved'),
+      peer.inbox.waitFor((event) => event.type === 'messagesRemoved'),
+    ]);
+    assert.deepEqual(new Set(firstRemoval.messageIds), new Set(deletedIds));
+    assert.deepEqual(firstRemoval, secondRemoval, '所有成员收到同一批删除编号');
+    assert.deepEqual(outsideRemovals, []);
+    if (privateRoom) {
+      assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, 'messages.json'), 'utf8')), [outsideMessage]);
+    }
+    const again = await connectClient(baseUrl, '重进的成员', sender.clientId, {}, room);
+    sockets.push(again.socket);
+    assert.deepEqual(again.welcome.history, [retained]);
+    assert.equal(again.welcome.chatQuota.used, privateRoom ? 4 : 3, '清理消息不能恢复每日额度');
+    const messagesPath = room.id
+      ? path.join(dataDir, 'rooms', room.id, 'messages.json') : path.join(dataDir, 'messages.json');
+    assert.deepEqual(JSON.parse(await fs.readFile(messagesPath, 'utf8')), [retained]);
+    assert.equal(again.welcome.files.length, 2, '删除聊天记录不删除已经上传的文件本体');
+    for (const file of uploads) {
+      const response = await fetch(`${baseUrl}${file.downloadUrl}`, {
+        headers: { 'X-Room-Session': peer.welcome.roomSession || '' },
+      });
+      assert.equal(await response.text(), 'file content stays available');
+    }
+    await fixture.restart();
+    const afterRestart = await connectClient(fixture.baseUrl, '重启后重进', sender.clientId, {}, room);
+    sockets.push(afterRestart.socket);
+    assert.deepEqual(afterRestart.welcome.history, [retained]);
+  });
+}
+
+test('成员离开会中断未完成上传并退回额度，立即重连不会恢复旧消息', async (context) => {
+  const { baseUrl, sockets, dataDir } = await roomFixture(context);
+  const observer = await connectClient(baseUrl, '观察者', 'device-stream-erase-observer');
+  const sender = await connectClient(baseUrl, '离开者', 'device-stream-erase-sender');
+  sockets.push(observer.socket, sender.socket);
+  sender.socket.send(JSON.stringify({ type: 'chat', text: '上传前的旧消息' }));
+  await observer.inbox.waitFor((event) => event.message?.text === '上传前的旧消息');
+  let request;
+  const ended = new Promise((resolve) => {
+    request = http.request(`${baseUrl}/api/files`, {
+      method: 'POST', headers: {
+        Origin: baseUrl, 'Content-Length': 1024 * 1024,
+        'X-File-Name': Buffer.from('unfinished.txt').toString('base64url'),
+        'X-Client-Id': sender.clientId, 'X-Upload-Id': 'stream-erase-upload',
+      },
+    }, (response) => { response.resume(); response.on('end', resolve); });
+    request.on('error', resolve);
+  });
+  context.after(() => request.destroy());
+  request.write(Buffer.alloc(1024));
+  await observer.inbox.waitFor((event) => event.type === 'uploads' && event.uploads.some((upload) => upload.receivedBytes >= 1024));
+  sender.socket.terminate();
+  await observer.inbox.waitFor((event) => event.message?.kind === 'offline');
+  const again = await connectClient(baseUrl, '立即重连', sender.clientId);
+  sockets.push(again.socket);
+  assert.deepEqual(again.welcome.history, []);
+  await ended;
+  if (again.welcome.chatQuota.used !== 1) {
+    await again.inbox.waitFor((event) => event.type === 'chatQuota' && event.chatQuota.used === 1);
+  }
+  assert.deepEqual(await fs.readdir(path.join(dataDir, 'incoming')), []);
+  assert.deepEqual(await fs.readdir(path.join(dataDir, 'uploads')), []);
+});
+
+test('离开前已接收但尚未完成的上传不能在重连后重新插入旧消息，新连接消息仍保留', async (context) => {
+  const fixture = await roomFixture(context);
+  const { baseUrl, sockets, dataDir } = fixture;
+  const observer = await connectClient(baseUrl, '观察者', 'device-late-erase-observer');
+  const sender = await connectClient(baseUrl, '旧连接', 'device-late-erase-sender');
+  sockets.push(observer.socket, sender.socket);
+  sender.socket.send(JSON.stringify({ type: 'chat', text: '需要删除的旧消息' }));
+  await observer.inbox.waitFor((event) => event.message?.text === '需要删除的旧消息');
+  const store = fixture.app.fileStore;
+  const originalReceive = store.receive;
+  let releaseReceive;
+  const gate = new Promise((resolve) => { releaseReceive = resolve; });
+  let markReceived;
+  const received = new Promise((resolve) => { markReceived = resolve; });
+  store.receive = async function (...args) {
+    const file = await originalReceive.apply(this, args);
+    markReceived();
+    await gate;
+    return file;
+  };
+  try {
+    const upload = fetch(`${baseUrl}/api/files`, {
+      method: 'POST', headers: {
+        Origin: baseUrl, 'X-Client-Id': sender.clientId,
+        'X-File-Name': Buffer.from('late.txt').toString('base64url'),
+      }, body: 'completed bytes before leaving',
+    }).then((response) => response.arrayBuffer(), () => null);
+    await received;
+    sender.socket.close();
+    await observer.inbox.waitFor((event) => event.message?.kind === 'offline');
+    const again = await connectClient(baseUrl, '新连接', sender.clientId);
+    sockets.push(again.socket);
+    assert.deepEqual(again.welcome.history, []);
+    again.socket.send(JSON.stringify({ type: 'chat', text: '重新进入后的新消息' }));
+    const fresh = (await observer.inbox.waitFor((event) => event.message?.text === '重新进入后的新消息')).message;
+    releaseReceive();
+    await upload;
+    await again.inbox.waitFor((event) => event.type === 'chatQuota' && event.chatQuota.used === 2);
+    const late = await connectClient(baseUrl, '后来者', 'device-late-erase-reader');
+    sockets.push(late.socket);
+    assert.deepEqual(late.welcome.history, [fresh]);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, 'messages.json'), 'utf8')), [fresh]);
+  } finally {
+    releaseReceive();
+    store.receive = originalReceive;
+  }
+});
+
+test('删除聊天记录与新增写入排队，写盘失败不改变内存且可重试', async (context) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-erase-store-'));
+  context.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const store = new ChatStore(dataDir);
+  await store.init();
+  const message = (id, senderId) => ({ id, kind: 'text', text: id, sender: { id: senderId }, createdAt: new Date().toISOString() });
+  const first = message('remove-first', 'sender');
+  const retained = message('retained', 'observer');
+  await store.add(first);
+  await store.add(retained);
+  const originalWrite = store.store.write;
+  store.store.write = () => Promise.reject(new Error('simulated disk failure'));
+  await assert.rejects(store.removeBySender('sender'), /simulated disk failure/u);
+  assert.deepEqual(store.list(), [first, retained]);
+  store.store.write = originalWrite;
+  const queued = message('remove-queued', 'sender');
+  const [added, removed] = await Promise.all([store.add(queued), store.removeBySender('sender')]);
+  assert.deepEqual(added, queued);
+  assert.deepEqual(removed, [first.id, queued.id]);
+  assert.deepEqual(store.list(), [retained]);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, 'messages.json'), 'utf8')), [retained]);
+});
+
 async function roomFixture(context, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-rooms-'));
   let app = await createLanDropServer({ host: '127.0.0.1', port: 0, dataDir, ...options });
   const sockets = [];
-  const fixture = { dataDir, sockets, baseUrl: `http://127.0.0.1:${(await app.start()).port}` };
+  const fixture = { dataDir, sockets, baseUrl: `http://127.0.0.1:${(await app.start()).port}`, get app() { return app; } };
   fixture.restart = async () => {
     await app.stop();
     app = await createLanDropServer({ host: '127.0.0.1', port: 0, dataDir, ...options });

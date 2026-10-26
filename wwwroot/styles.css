@@ -345,6 +345,34 @@ textarea:focus-visible,
   flex-direction: row-reverse;
 }
 
+.message-row.message-removing {
+  overflow: hidden;
+  pointer-events: none;
+  animation: message-dissolve 650ms ease-in-out forwards;
+}
+
+@keyframes message-dissolve {
+  0% {
+    opacity: 1;
+    max-height: var(--removed-height);
+    margin-bottom: 18px;
+  }
+  60% {
+    opacity: 0;
+    max-height: var(--removed-height);
+    margin-bottom: 18px;
+    filter: blur(4px);
+    transform: translateY(-6px) scale(0.98);
+  }
+  100% {
+    opacity: 0;
+    max-height: 0;
+    margin-bottom: 0;
+    filter: blur(4px);
+    transform: translateY(-6px) scale(0.98);
+  }
+}
+
 .system-message-row {
   justify-content: center;
   min-width: 0;
@@ -1283,6 +1311,10 @@ textarea:focus-visible,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .message-row.message-removing {
+    animation: none;
+  }
+
   *,
   *::before,
   *::after {

@@ -37,6 +37,19 @@ class ChatStore {
     this.mutationQueue = operation.catch(() => {});
     return operation;
   }
+
+  removeBySender(senderId) {
+    const operation = this.mutationQueue.then(async () => {
+      const removed = this.messages.filter((message) => message.sender?.id === senderId);
+      if (removed.length === 0) return [];
+      const nextMessages = this.messages.filter((message) => message.sender?.id !== senderId);
+      await this.store.write(nextMessages);
+      this.messages = nextMessages;
+      return removed.map((message) => message.id);
+    });
+    this.mutationQueue = operation.catch(() => {});
+    return operation;
+  }
 }
 
 function isStoredMessage(message) {

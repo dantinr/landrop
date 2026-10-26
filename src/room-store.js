@@ -42,6 +42,7 @@ class RoomStore {
     const room = {
       ...metadata, directory, destroyed: false,
       clients: new Set(), activeUploads: new Map(), operations: new Set(),
+      deviceSessions: new Map(), pendingMessageRemovals: new Set(),
       responses: new Map(), uploadBroadcastTimer: null,
       metadata: new JsonStore(path.join(directory, 'room.json'), null),
       fileStore: new FileStore(directory),

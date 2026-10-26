@@ -48,7 +48,7 @@ async function createLanDropServer(options = {}) {
 
   const broadcastQuota = (deviceId) => {
     for (const client of allClients) {
-      if (client.id === deviceId) {
+      if (client.id === deviceId && client.welcomed) {
         sendSocket(client.webSocket, { type: 'chatQuota', chatQuota: dailyMessageLimit.status(deviceId) });
       }
     }
@@ -163,6 +163,8 @@ async function createLanDropServer(options = {}) {
               name: normalizeUserName(singleHeader(request.headers['x-client-name'])),
               ip: remoteAddress(request, trustLoopbackProxy),
             };
+        const deviceSession = connectedClient?.deviceSession;
+        assertDeviceSession(deviceSession);
         const activeUpload = {
           id: uploadId,
           name: fileName,
@@ -170,6 +172,8 @@ async function createLanDropServer(options = {}) {
           receivedBytes: 0,
           sender,
           startedAt: new Date().toISOString(),
+          deviceSession,
+          request,
         };
         activeUploads.set(uploadId, activeUpload);
         broadcastUploadsNow(room);
@@ -177,15 +181,21 @@ async function createLanDropServer(options = {}) {
         const quotaDeviceId = member || claimedClientId ? sender.id : `ip:${sender.ip}`;
         return await rooms.run(room, async () => {
           try {
-            const file = await dailyMessageLimit.run(quotaDeviceId, () => fileStore.receive(
-              request,
-              { fileName, mimeType, sender },
-              (receivedBytes) => {
-                activeUpload.receivedBytes = receivedBytes;
-                scheduleUploadBroadcast(room);
-              },
-            ));
+            const file = await dailyMessageLimit.run(quotaDeviceId, async () => {
+              assertDeviceSession(deviceSession);
+              const received = await fileStore.receive(
+                request,
+                { fileName, mimeType, sender },
+                (receivedBytes) => {
+                  activeUpload.receivedBytes = receivedBytes;
+                  scheduleUploadBroadcast(room);
+                },
+              );
+              assertDeviceSession(deviceSession);
+              return received;
+            });
             rooms.assertActive(room);
+            assertDeviceSession(deviceSession);
             activeUpload.receivedBytes = file.size;
             activeUpload.totalBytes = file.size;
             const message = {
@@ -200,6 +210,7 @@ async function createLanDropServer(options = {}) {
               console.error('保存聊天记录失败:', error.message);
             });
             rooms.assertActive(room);
+            assertDeviceSession(deviceSession);
             broadcast(clients, { type: 'message', message });
             return sendJson(response, 201, { file: exposeFile(file), message });
           } finally {
@@ -272,6 +283,8 @@ async function createLanDropServer(options = {}) {
       name: '访客',
       ip: remoteAddress(request, trustLoopbackProxy),
       ready: false,
+      welcomed: false,
+      deviceSession: null,
       isAlive: true,
       webSocket,
     };
@@ -282,18 +295,28 @@ async function createLanDropServer(options = {}) {
     }, 15_000);
     joinTimeout.unref();
 
-    sendSocket(webSocket, {
-      type: 'welcome',
-      clientId: client.id,
-      room: publicRoom(room),
-      roomSession: room.id ? client.session : undefined,
-      chatQuota: dailyMessageLimit.status(client.id),
-      chatHistoryLimit: chatStore.limit,
-      history: chatStore.list(),
-      files: fileStore.list().map((file) => publicFile(file, room.id)),
-      uploads: publicActiveUploads(activeUploads),
-      serverName,
-    });
+    const welcome = async () => {
+      // A new connection must not receive history that is still being removed.
+      while (room.pendingMessageRemovals.size > 0) {
+        await Promise.allSettled([...room.pendingMessageRemovals]);
+      }
+      if (!clients.has(client) || webSocket.readyState !== WebSocket.OPEN) return;
+      rooms.assertActive(room);
+      sendSocket(webSocket, {
+        type: 'welcome',
+        clientId: client.id,
+        room: publicRoom(room),
+        roomSession: room.id ? client.session : undefined,
+        chatQuota: dailyMessageLimit.status(client.id),
+        chatHistoryLimit: chatStore.limit,
+        history: chatStore.list(),
+        files: fileStore.list().map((file) => publicFile(file, room.id)),
+        uploads: publicActiveUploads(activeUploads),
+        serverName,
+      });
+      client.welcomed = true;
+    };
+    welcome().catch(() => webSocket.close(4004, 'Room unavailable'));
 
     webSocket.on('pong', () => {
       client.isAlive = true;
@@ -303,6 +326,9 @@ async function createLanDropServer(options = {}) {
       if (isBinary) return socketError(webSocket, '不支持二进制聊天消息');
       try {
         rooms.assertActive(room);
+        if (!clients.has(client) || !client.welcomed) {
+          throw new HttpError(409, '房间正在准备，请重新连接', 'ROOM_NOT_READY');
+        }
         const payload = JSON.parse(buffer.toString('utf8'));
         if (!payload || typeof payload.type !== 'string') {
           throw new HttpError(400, '消息格式无效', 'INVALID_SOCKET_MESSAGE');
@@ -312,6 +338,14 @@ async function createLanDropServer(options = {}) {
           clearTimeout(joinTimeout);
           const firstJoin = !client.ready;
           const alreadyOnline = readyClients(clients).some((online) => online.id === client.id);
+          if (firstJoin) {
+            let session = room.deviceSessions.get(client.id);
+            if (!session) {
+              session = { active: true };
+              room.deviceSessions.set(client.id, session);
+            }
+            client.deviceSession = session;
+          }
           client.name = normalizeUserName(payload.name);
           client.ready = true;
           sendSocket(webSocket, { type: 'room', room: publicRoom(room), isOwner: rooms.isOwner(room, payload.ownerToken) });
@@ -335,6 +369,7 @@ async function createLanDropServer(options = {}) {
         }
 
         if (payload.type === 'chat') {
+          const deviceSession = client.deviceSession;
           const message = {
             id: crypto.randomUUID(),
             kind: 'text',
@@ -343,8 +378,12 @@ async function createLanDropServer(options = {}) {
             createdAt: new Date().toISOString(),
           };
           try {
-            await rooms.run(room, () => dailyMessageLimit.run(client.id, () => chatStore.add(message)));
+            await rooms.run(room, () => dailyMessageLimit.run(client.id, () => {
+              assertDeviceSession(deviceSession);
+              return chatStore.add(message);
+            }));
             rooms.assertActive(room);
+            assertDeviceSession(deviceSession);
           } catch (error) {
             if (!(error instanceof HttpError)) throw error;
             sendSocket(webSocket, {
@@ -390,6 +429,23 @@ async function createLanDropServer(options = {}) {
       if (room.destroyed || stopping) return;
       broadcastPresence(clients, Boolean(room.id));
       if (client.ready && !readyClients(clients).some((online) => online.id === client.id)) {
+        client.deviceSession.active = false;
+        room.deviceSessions.delete(client.id);
+        for (const upload of activeUploads.values()) {
+          if (upload.deviceSession === client.deviceSession) upload.request.destroy();
+        }
+        const removal = rooms.run(room, async () => {
+          const messageIds = await chatStore.removeBySender(client.id);
+          if (!room.destroyed && messageIds.length > 0) {
+            broadcast(clients, { type: 'messagesRemoved', messageIds });
+          }
+        });
+        room.pendingMessageRemovals.add(removal);
+        removal.finally(() => room.pendingMessageRemovals.delete(removal)).catch((error) => {
+          if (room.destroyed) return;
+          console.error('清理离开成员的聊天记录失败:', error.message);
+          broadcast(clients, { type: 'error', code: 'MESSAGE_CLEANUP_FAILED', message: '离开成员的消息清理失败，请稍后重试' });
+        });
         broadcast(clients, {
           type: 'message',
           message: {
@@ -438,17 +494,25 @@ async function createLanDropServer(options = {}) {
       for (const room of rooms.all()) clearTimeout(room.uploadBroadcastTimer);
       for (const client of allClients) client.webSocket.terminate();
       await new Promise((resolve) => wss.close(() => resolve()));
-      if (!server.listening) return;
-      await new Promise((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-        server.closeAllConnections();
-      });
+      if (server.listening) {
+        await new Promise((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+          server.closeAllConnections();
+        });
+      }
+      await Promise.allSettled(rooms.all().flatMap((room) => [...room.operations]));
     },
   };
 }
 
 function publicSender(client) {
   return { id: client.id, name: client.name, ip: client.ip };
+}
+
+function assertDeviceSession(session) {
+  if (session && !session.active) {
+    throw new HttpError(409, '已离开房间，请重新进入后发送', 'ROOM_LEFT');
+  }
 }
 
 function normalizeDeviceId(value) {
@@ -503,7 +567,7 @@ function broadcastPresence(clients, byDevice = false) {
 function broadcast(clients, payload, excludedClient = null) {
   const encoded = JSON.stringify(payload);
   for (const client of clients) {
-    if (client !== excludedClient && client.webSocket.readyState === WebSocket.OPEN) {
+    if (client !== excludedClient && client.welcomed && client.webSocket.readyState === WebSocket.OPEN) {
       try {
         client.webSocket.send(encoded);
       } catch {
