@@ -9,6 +9,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/styles.css">
     <script src="/vendor/lucide.min.js" defer></script>
+    <script src="/avatars.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
@@ -40,6 +41,9 @@
           </label>
           <button class="icon-button" id="copy-address" type="button" title="复制当前地址" aria-label="复制当前地址">
             <i data-lucide="copy" aria-hidden="true"></i>
+          </button>
+          <button class="profile-avatar-button" id="choose-avatar" type="button" title="修改头像" aria-label="修改头像" aria-haspopup="dialog" aria-controls="avatar-dialog">
+            <span id="current-avatar" aria-hidden="true"></span>
           </button>
         </div>
       </header>
@@ -180,6 +184,29 @@
           <button class="primary-button" id="retry-room" type="button">重试进入</button>
         </div>
       </div>
+    </dialog>
+
+    <dialog class="image-viewer" id="image-viewer" aria-labelledby="image-viewer-title">
+      <div class="image-viewer-toolbar">
+        <h2 id="image-viewer-title"></h2>
+        <a class="icon-button" id="viewer-download" download aria-label="下载图片" title="下载图片"><i data-lucide="download" aria-hidden="true"></i></a>
+        <button class="icon-button" id="close-viewer" type="button" aria-label="关闭图片预览" title="关闭图片预览（Esc）" autofocus><i data-lucide="x" aria-hidden="true"></i></button>
+      </div>
+      <div class="image-viewer-stage">
+        <img id="viewer-image" alt="" decoding="async" hidden>
+        <p id="image-viewer-status" role="status" aria-live="polite" hidden></p>
+      </div>
+    </dialog>
+
+    <dialog class="people-dialog avatar-dialog" id="avatar-dialog" aria-labelledby="avatar-dialog-title">
+      <div class="dialog-heading">
+        <div>
+          <h2 id="avatar-dialog-title">选择生肖头像</h2>
+          <p>选择后立即生效，自动记住你的选择</p>
+        </div>
+        <button class="icon-button" id="close-avatar" type="button" aria-label="关闭头像选择"><i data-lucide="x" aria-hidden="true"></i></button>
+      </div>
+      <div class="avatar-grid" id="avatar-options" role="group" aria-label="十二生肖头像"></div>
     </dialog>
 
     <dialog class="people-dialog" id="people-dialog">

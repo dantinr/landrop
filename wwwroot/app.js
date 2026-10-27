@@ -1,6 +1,7 @@
 'use strict';
 
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+const avatars = window.LanDropAvatars;
 
 const elements = {
   connectionState: document.querySelector('#connection-state'),
@@ -8,6 +9,17 @@ const elements = {
   onlineButton: document.querySelector('#online-button'),
   onlineCount: document.querySelector('#online-count'),
   nameInput: document.querySelector('#name-input'),
+  chooseAvatar: document.querySelector('#choose-avatar'),
+  currentAvatar: document.querySelector('#current-avatar'),
+  avatarDialog: document.querySelector('#avatar-dialog'),
+  avatarOptions: document.querySelector('#avatar-options'),
+  closeAvatar: document.querySelector('#close-avatar'),
+  imageViewer: document.querySelector('#image-viewer'),
+  viewerImage: document.querySelector('#viewer-image'),
+  viewerTitle: document.querySelector('#image-viewer-title'),
+  viewerStatus: document.querySelector('#image-viewer-status'),
+  viewerDownload: document.querySelector('#viewer-download'),
+  closeViewer: document.querySelector('#close-viewer'),
   copyAddress: document.querySelector('#copy-address'),
   serverName: document.querySelector('#server-name'),
   appVersion: document.querySelector('#app-version'),
@@ -67,6 +79,7 @@ const elements = {
 const state = {
   socket: null,
   deviceId: loadDeviceId(),
+  avatar: null,
   clientId: null,
   connected: false,
   chatQuota: null,
@@ -96,6 +109,8 @@ init();
 
 function init() {
   elements.nameInput.value = loadName();
+  state.avatar = avatars.normalize(localStorage.getItem('landrop-avatar'), state.deviceId);
+  renderAvatarPicker();
   bindEvents();
   updateResponsiveLayout();
   refreshIcons();
@@ -106,6 +121,41 @@ function init() {
 }
 
 function bindEvents() {
+  elements.closeViewer.addEventListener('click', () => elements.imageViewer.close());
+  elements.imageViewer.addEventListener('click', (event) => {
+    if (event.target === elements.imageViewer || event.target.classList.contains('image-viewer-stage')) {
+      elements.imageViewer.close();
+    }
+  });
+  elements.imageViewer.addEventListener('close', () => {
+    elements.viewerImage.removeAttribute('src');
+    elements.viewerImage.alt = '';
+    elements.viewerDownload.removeAttribute('href');
+    elements.viewerTitle.textContent = '';
+  });
+  elements.viewerImage.addEventListener('load', () => {
+    if (!elements.imageViewer.open) return;
+    elements.viewerImage.hidden = false;
+    elements.viewerStatus.hidden = true;
+  });
+  elements.viewerImage.addEventListener('error', () => {
+    if (!elements.imageViewer.open) return;
+    elements.viewerImage.hidden = true;
+    elements.viewerStatus.textContent = '图片加载失败，可下载后查看';
+    elements.viewerStatus.hidden = false;
+  });
+  elements.chooseAvatar.addEventListener('click', () => elements.avatarDialog.showModal());
+  elements.closeAvatar.addEventListener('click', () => elements.avatarDialog.close());
+  elements.avatarDialog.addEventListener('click', (event) => {
+    if (event.target === elements.avatarDialog) elements.avatarDialog.close();
+  });
+  window.addEventListener('storage', (event) => {
+    if (event.key !== 'landrop-avatar') return;
+    state.avatar = avatars.normalize(event.newValue, state.deviceId);
+    renderAvatarPicker();
+    refreshMessageAvatars();
+    sendProfile();
+  });
   elements.createRoom.addEventListener('click', () => {
     elements.roomFormError.textContent = '';
     elements.createdRoomLink.hidden = true;
@@ -263,7 +313,7 @@ function handleSocketPayload(payload) {
     renderHistory(payload.history || []);
     replaceFiles(payload.files || []);
     replaceNetworkUploads(payload.uploads || []);
-    sendSocket({ type: 'join', name: currentName(), ownerToken: loadOwnerToken() });
+    sendProfile();
     setConnectionState('connected', '已连接');
     refreshStatus();
     return;
@@ -284,6 +334,7 @@ function handleSocketPayload(payload) {
 
   if (payload.type === 'presence') {
     state.users = Array.isArray(payload.users) ? payload.users : [];
+    refreshMessageAvatars();
     renderPresence();
     renderRoom();
     return;
@@ -392,7 +443,66 @@ function commitName() {
   const name = currentName();
   elements.nameInput.value = name;
   localStorage.setItem('landrop-name', name);
-  if (state.connected) sendSocket({ type: 'join', name, ownerToken: loadOwnerToken() });
+  sendProfile();
+}
+
+function sendProfile() {
+  if (state.connected) sendSocket({ type: 'join', name: currentName(), avatar: state.avatar, ownerToken: loadOwnerToken() });
+}
+
+function renderAvatarPicker() {
+  const selected = avatars.choices.find((choice) => choice.id === state.avatar);
+  elements.currentAvatar.textContent = selected.emoji;
+  elements.chooseAvatar.title = `当前头像：${selected.name}，点击修改`;
+  elements.chooseAvatar.setAttribute('aria-label', `修改头像，当前为${selected.name}`);
+  elements.avatarOptions.replaceChildren();
+  for (const choice of avatars.choices) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'avatar-option';
+    button.setAttribute('aria-label', `${choice.name}头像`);
+    button.setAttribute('aria-pressed', String(choice.id === state.avatar));
+    const emoji = document.createElement('span');
+    emoji.className = 'zodiac-emoji';
+    emoji.textContent = choice.emoji;
+    emoji.setAttribute('aria-hidden', 'true');
+    const label = document.createElement('span');
+    label.textContent = choice.name;
+    button.append(emoji, label);
+    button.addEventListener('click', () => {
+      state.avatar = choice.id;
+      localStorage.setItem('landrop-avatar', state.avatar);
+      renderAvatarPicker();
+      refreshMessageAvatars();
+      sendProfile();
+      elements.avatarDialog.close();
+      showToast(`已切换为${choice.name}头像`);
+    });
+    elements.avatarOptions.append(button);
+  }
+}
+
+function renderAvatar(element, sender) {
+  const profile = sender?.id === state.clientId
+    ? { ...sender, avatar: state.avatar }
+    : state.users.find((user) => user.id === sender?.id) || sender;
+  const id = avatars.normalize(profile?.avatar, profile?.id);
+  const choice = avatars.choices.find((avatar) => avatar.id === id);
+  element.textContent = choice.emoji;
+  element.dataset.avatar = id;
+  element.dataset.senderId = sender?.id || '';
+  element.title = `${sender?.name || '访客'} · ${choice.name}头像`;
+  element.setAttribute('role', 'img');
+  element.setAttribute('aria-label', `${choice.name}头像`);
+}
+
+function refreshMessageAvatars() {
+  for (const element of elements.messages.querySelectorAll('.avatar')) {
+    const profile = state.users.find((user) => user.id === element.dataset.senderId);
+    if (profile || element.dataset.senderId === state.clientId) {
+      renderAvatar(element, profile || { id: state.clientId, name: currentName() });
+    }
+  }
 }
 
 function sendMessage(event) {
@@ -491,8 +601,7 @@ function appendMessage(message, animateScroll = true) {
   } else {
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
-    avatar.textContent = firstCharacter(message.sender?.name || '访');
-    avatar.title = message.sender?.name || '访客';
+    renderAvatar(avatar, message.sender);
 
     const content = document.createElement('div');
     content.className = 'message-content';
@@ -586,6 +695,14 @@ function createFileMessage(file) {
 
   if (isImageFile(file)) {
     container.classList.add('image-file-message');
+    const preview = document.createElement('button');
+    preview.type = 'button';
+    preview.className = 'image-preview-button';
+    preview.title = '点击放大预览';
+    preview.setAttribute('aria-label', `放大预览 ${file.name}`);
+    preview.setAttribute('aria-haspopup', 'dialog');
+    preview.setAttribute('aria-controls', 'image-viewer');
+    preview.addEventListener('click', () => openImagePreview(file));
     const image = document.createElement('img');
     image.className = 'image-preview';
     image.alt = file.name;
@@ -596,11 +713,12 @@ function createFileMessage(file) {
     fallback.textContent = '图片暂时无法预览，可下载查看';
     fallback.hidden = true;
     image.addEventListener('error', () => {
-      image.hidden = true;
+      preview.hidden = true;
       fallback.hidden = false;
     }, { once: true });
     image.src = fileDownloadUrl(file);
-    container.append(image, fallback);
+    preview.append(image);
+    container.append(preview, fallback);
   }
 
   const icon = document.createElement('div');
@@ -632,6 +750,20 @@ function createDownloadButton(file) {
   link.setAttribute('aria-label', `下载 ${file.name}`);
   link.append(createIcon('download'));
   return link;
+}
+
+function openImagePreview(file) {
+  const url = fileDownloadUrl(file);
+  elements.viewerTitle.textContent = file.name;
+  elements.viewerImage.alt = file.name;
+  elements.viewerImage.hidden = true;
+  elements.viewerStatus.textContent = '正在加载图片…';
+  elements.viewerStatus.hidden = false;
+  elements.viewerDownload.href = url;
+  elements.viewerDownload.download = file.name;
+  elements.viewerDownload.setAttribute('aria-label', `下载 ${file.name}`);
+  elements.imageViewer.showModal();
+  elements.viewerImage.src = url;
 }
 
 function fileDownloadUrl(file) {
@@ -1089,7 +1221,7 @@ function renderPresence() {
     row.className = 'person-row';
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
-    avatar.textContent = firstCharacter(user.name || '访');
+    renderAvatar(avatar, user);
     const info = document.createElement('div');
     info.className = 'person-info';
     const name = document.createElement('strong');
@@ -1217,6 +1349,7 @@ async function destroyRoom() {
 }
 
 function roomUnavailable(message, canRetry) {
+  if (elements.imageViewer.open) elements.imageViewer.close();
   state.roomUnavailable = true;
   state.connected = false;
   state.roomSession = null;
@@ -1291,10 +1424,6 @@ function fileIconName(file) {
   if (['xls', 'xlsx', 'csv'].includes(extension)) return 'sheet';
   if (['ppt', 'pptx'].includes(extension)) return 'presentation';
   return 'file';
-}
-
-function firstCharacter(value) {
-  return Array.from(String(value).trim())[0]?.toUpperCase() || '访';
 }
 
 function formatTime(value) {

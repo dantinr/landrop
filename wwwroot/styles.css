@@ -130,6 +130,25 @@ textarea:focus-visible,
   gap: 10px;
 }
 
+.profile-avatar-button {
+  display: grid;
+  flex: 0 0 40px;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  font-size: 25px;
+  cursor: pointer;
+}
+
+.profile-avatar-button:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
 .connection-state,
 .online-button {
   display: inline-flex;
@@ -416,8 +435,8 @@ textarea:focus-visible,
   background: #dce7e3;
   border: 1px solid #cfdbd6;
   border-radius: 7px;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 23px;
+  font-weight: 400;
 }
 
 .message-row.own .avatar {
@@ -496,7 +515,7 @@ textarea:focus-visible,
   max-width: 100%;
 }
 
-.image-preview,
+.image-preview-button,
 .image-preview-error {
   grid-column: 1 / -1;
   width: 100%;
@@ -505,8 +524,18 @@ textarea:focus-visible,
   border-radius: 6px;
 }
 
+.image-preview-button {
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  cursor: zoom-in;
+}
+
 .image-preview {
   display: block;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
 }
 
@@ -520,8 +549,90 @@ textarea:focus-visible,
   text-align: center;
 }
 
-.image-preview[hidden],
+.image-preview-button[hidden],
 .image-preview-error[hidden] {
+  display: none;
+}
+
+.image-viewer {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  overflow: hidden;
+  color: #ffffff;
+  background: rgba(12, 19, 16, 0.96);
+  border: 0;
+}
+
+.image-viewer[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+}
+
+.image-viewer::backdrop {
+  background: #0c1310;
+}
+
+.image-viewer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.image-viewer-toolbar h2 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-viewer-toolbar .icon-button {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.1);
+  border-color: transparent;
+}
+
+.image-viewer-toolbar .icon-button:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.image-viewer-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+}
+
+#viewer-image {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+#image-viewer-status {
+  color: #dce2df;
+  text-align: center;
+}
+
+#viewer-image[hidden],
+#image-viewer-status[hidden] {
   display: none;
 }
 
@@ -986,6 +1097,47 @@ textarea:focus-visible,
   background: rgba(18, 28, 24, 0.32);
 }
 
+.avatar-dialog {
+  max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 24px);
+}
+
+.avatar-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 16px;
+}
+
+.avatar-option {
+  display: grid;
+  place-items: center;
+  gap: 4px;
+  min-height: 76px;
+  padding: 8px 4px;
+  color: var(--text);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.avatar-option:hover,
+.avatar-option[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.avatar-option[aria-pressed="true"] {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.zodiac-emoji {
+  font-size: 29px;
+  line-height: 34px;
+}
+
 .dialog-heading {
   display: flex;
   align-items: center;
@@ -1158,7 +1310,7 @@ textarea:focus-visible,
   .connection-state,
   .online-button {
     display: inline-grid;
-    width: 40px;
+    width: 24px;
     height: 44px;
     min-height: 44px;
     place-items: center;
@@ -1166,7 +1318,7 @@ textarea:focus-visible,
   }
 
   .online-button {
-    width: 44px;
+    width: 36px;
   }
 
   .online-button svg {
@@ -1175,7 +1327,7 @@ textarea:focus-visible,
   }
 
   .name-field {
-    width: 96px;
+    width: clamp(64px, 19vw, 96px);
     height: 44px;
     padding: 0 9px;
   }
@@ -1243,7 +1395,7 @@ textarea:focus-visible,
     width: 30px;
     height: 30px;
     margin-top: 18px;
-    font-size: 12px;
+    font-size: 21px;
   }
 
   .message-content {

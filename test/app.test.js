@@ -17,6 +17,7 @@ const { readConfig } = require('../src/config');
 const { DailyMessageLimit, messageDay } = require('../src/daily-message-limit');
 const { FileStore } = require('../src/file-store');
 const { decodeFileName, parseByteRange } = require('../src/validation');
+const avatars = require('../wwwroot/avatars');
 
 test('聊天、上传、文件广播和下载可以完整工作', async (context) => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-test-'));
@@ -151,7 +152,7 @@ test('设备上线时广播提示，改名和同设备多标签页不重复，�
   const senderNotice = await sender.inbox.waitFor((event) => event.message?.kind === 'online');
   assert.deepEqual(firstNotice, senderNotice);
   assert.deepEqual(firstNotice.message.sender, {
-    id: sender.clientId, name: '书房电脑', ip: '127.0.0.1',
+    id: sender.clientId, name: '书房电脑', ip: '127.0.0.1', avatar: avatars.normalize(undefined, sender.clientId),
   });
   assert.equal(Number.isNaN(Date.parse(firstNotice.message.createdAt)), false);
 
@@ -233,7 +234,7 @@ for (const privateRoom of [false, true]) {
       && event.users.some((user) => user.name === '最后昵称'));
     tab.socket.close();
     const departed = await observer.inbox.waitFor((event) => event.message?.kind === 'offline');
-    assert.deepEqual(departed.message.sender, { id: sender.clientId, name: '最后昵称', ip: '127.0.0.1' });
+    assert.deepEqual(departed.message.sender, { id: sender.clientId, name: '最后昵称', ip: '127.0.0.1', avatar: avatars.normalize(undefined, sender.clientId) });
     assert.equal(Number.isNaN(Date.parse(departed.message.createdAt)), false);
     assert.equal(departures.length, 1, '同一次关闭只能提示一次');
     assert.deepEqual(outsideDepartures, [], '离开提示不能广播到其他房间');
@@ -1514,6 +1515,76 @@ test('Redis 公共与专有房间隔离，文字图片文件受保留限制，�
   assert.equal(await redis.client.lLen(redis.key('')), 1);
   assert.equal((await fetch(`${fixture.baseUrl}/api/rooms/${created.room.id}`)).status, 404);
 });
+
+for (const privateRoom of [false, true]) {
+  test(`${privateRoom ? '专有' : '公共'}房间的生肖头像同步到成员、文字、上传和历史，拒绝非法头像`, async (context) => {
+    const fixture = await roomFixture(context, { dailyMessageLimit: 10 });
+    const { baseUrl, sockets, dataDir } = fixture;
+    const room = privateRoom ? (await createTestRoom(baseUrl, '头像测试', 3)).room : {};
+    const observer = await connectClient(baseUrl, '观察者', 'device-avatar-observer', {}, room);
+    const sender = await connectClient(baseUrl, '生肖用户', 'device-avatar-sender', {}, room);
+    sockets.push(observer.socket, sender.socket);
+    const initial = await observer.inbox.waitFor((event) => event.type === 'presence' && event.count === 2);
+    assert.equal(initial.users.find((user) => user.id === sender.clientId).avatar, avatars.normalize(undefined, sender.clientId));
+    const online = await observer.inbox.waitFor((event) => event.message?.kind === 'online' && event.message.sender.id === sender.clientId);
+    assert.equal(online.message.sender.avatar, avatars.normalize(undefined, sender.clientId));
+
+    const notices = [];
+    observer.socket.on('message', (buffer) => {
+      const event = JSON.parse(buffer.toString());
+      if (event.message?.kind === 'online') notices.push(event);
+    });
+    sender.socket.send(JSON.stringify({ type: 'join', name: '生肖用户', avatar: 'dragon' }));
+    await observer.inbox.waitFor((event) => event.type === 'presence'
+      && event.users.some((user) => user.id === sender.clientId && user.avatar === 'dragon'));
+    for (const avatar of ['https://example.com/avatar.png', '<svg onload=alert(1)>', '', null, {}, 1]) {
+      sender.socket.send(JSON.stringify({ type: 'join', name: '不应生效', avatar }));
+      const error = await sender.inbox.waitFor((event) => event.type === 'error');
+      assert.equal(error.code, 'INVALID_AVATAR');
+    }
+    sender.socket.send(JSON.stringify({ type: 'chat', text: '龙头像消息' }));
+    const message = (await observer.inbox.waitFor((event) => event.message?.text === '龙头像消息')).message;
+    assert.equal(message.sender.avatar, 'dragon');
+    assert.equal(message.sender.name, '生肖用户');
+    const apiPath = room.id ? `/api/rooms/${room.id}` : '/api';
+    const upload = await fetch(`${baseUrl}${apiPath}/files`, {
+      method: 'POST',
+      headers: {
+        Origin: baseUrl, 'X-Client-Id': sender.clientId, 'X-Room-Session': sender.welcome.roomSession || '',
+        'X-File-Name': Buffer.from('头像图片.png').toString('base64url'), 'X-File-Type': 'image/png',
+      },
+      body: Buffer.from([137, 80, 78, 71]),
+    });
+    assert.equal(upload.status, 201);
+    assert.equal((await upload.json()).file.sender.avatar, 'dragon');
+    const file = (await observer.inbox.waitFor((event) => event.message?.kind === 'file')).message;
+    assert.equal(file.sender.avatar, 'dragon');
+    assert.equal(file.file.sender.avatar, 'dragon');
+    sender.socket.send(JSON.stringify({ type: 'chatQuota' }));
+    assert.equal((await sender.inbox.waitFor((event) => event.type === 'chatQuota' && event.chatQuota.remaining === 8)).chatQuota.used, 2);
+
+    const tab = await connectClient(baseUrl, '同设备标签页', sender.clientId, {}, room);
+    sockets.push(tab.socket);
+    assert.deepEqual(tab.welcome.history.map((event) => event.sender.avatar), ['dragon', 'dragon']);
+    tab.socket.send(JSON.stringify({ type: 'join', name: '同设备标签页', avatar: 'goat' }));
+    const updated = await observer.inbox.waitFor((event) => event.type === 'presence'
+      && event.users.some((user) => user.id === sender.clientId)
+      && event.users.filter((user) => user.id === sender.clientId).every((user) => user.avatar === 'goat'));
+    assert.ok(updated.users.some((user) => user.id === sender.clientId));
+    // Older clients omit avatar when changing their name; keep the chosen avatar.
+    sender.socket.send(JSON.stringify({ type: 'join', name: '兼容旧客户端' }));
+    sender.socket.send(JSON.stringify({ type: 'chat', text: '羊头像消息' }));
+    const latest = (await observer.inbox.waitFor((event) => event.message?.text === '羊头像消息')).message;
+    assert.equal(latest.sender.avatar, 'goat');
+    const historyPath = path.join(dataDir, ...(room.id ? ['rooms', room.id] : []), 'messages.json');
+    const history = JSON.parse(await fs.readFile(historyPath, 'utf8'));
+    assert.deepEqual(history.map((event) => event.sender.avatar), ['dragon', 'dragon', 'goat']);
+    assert.equal(notices.length, 0);
+    const catalog = await fetch(`${baseUrl}/avatars.js`);
+    assert.equal(catalog.status, 200);
+    assert.match(catalog.headers.get('content-type'), /javascript/u);
+  });
+}
 
 async function roomFixture(context, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'landrop-rooms-'));

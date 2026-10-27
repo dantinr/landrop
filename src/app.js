@@ -12,6 +12,7 @@ const { DailyMessageLimit } = require('./daily-message-limit');
 const { FILE_ID_PATTERN, MAX_UPLOAD_BYTES } = require('./file-store');
 const { RoomStore, publicRoom } = require('./room-store');
 const { createChatStorage } = require('./redis-chat-store');
+const avatars = require('../wwwroot/avatars');
 const {
   HttpError,
   contentDisposition,
@@ -27,6 +28,7 @@ const STATIC_FILES = new Map([
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
+  ['/avatars.js', ['avatars.js', 'text/javascript; charset=utf-8']],
   ['/favicon.svg', ['favicon.svg', 'image/svg+xml']],
   ['/vendor/lucide.min.js', ['vendor/lucide.min.js', 'text/javascript; charset=utf-8']],
 ]);
@@ -172,6 +174,7 @@ async function createLanDropServer(options = {}) {
               name: normalizeUserName(singleHeader(request.headers['x-client-name'])),
               ip: remoteAddress(request, trustLoopbackProxy),
             };
+        sender.avatar = avatars.normalize(sender.avatar, sender.id);
         const deviceSession = connectedClient?.deviceSession;
         assertDeviceSession(deviceSession);
         const activeUpload = {
@@ -288,6 +291,7 @@ async function createLanDropServer(options = {}) {
       id: deviceId,
       session: crypto.randomBytes(32).toString('base64url'),
       name: '访客',
+      avatar: avatars.normalize(readyClients(clients).find((online) => online.id === deviceId)?.avatar, deviceId),
       ip: remoteAddress(request, trustLoopbackProxy),
       ready: false,
       welcomed: false,
@@ -344,6 +348,9 @@ async function createLanDropServer(options = {}) {
         }
 
         if (payload.type === 'join') {
+          if (payload.avatar !== undefined && !avatars.isValid(payload.avatar)) {
+            throw new HttpError(400, '请选择有效的生肖头像', 'INVALID_AVATAR');
+          }
           clearTimeout(joinTimeout);
           const firstJoin = !client.ready;
           const alreadyOnline = readyClients(clients).some((online) => online.id === client.id);
@@ -356,6 +363,12 @@ async function createLanDropServer(options = {}) {
             client.deviceSession = session;
           }
           client.name = normalizeUserName(payload.name);
+          if (payload.avatar !== undefined) {
+            client.avatar = payload.avatar;
+            for (const online of clients) {
+              if (online.id === client.id) online.avatar = client.avatar;
+            }
+          }
           client.ready = true;
           sendSocket(webSocket, { type: 'room', room: publicRoom(room), isOwner: rooms.isOwner(room, payload.ownerToken) });
           broadcastPresence(clients, Boolean(room.id));
@@ -516,7 +529,7 @@ async function createLanDropServer(options = {}) {
 }
 
 function publicSender(client) {
-  return { id: client.id, name: client.name, ip: client.ip };
+  return { id: client.id, name: client.name, ip: client.ip, avatar: avatars.normalize(client.avatar, client.id) };
 }
 
 function assertDeviceSession(session) {
