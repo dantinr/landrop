@@ -37,6 +37,7 @@ async function createLanDropServer(options = {}) {
   const dataDir = path.resolve(options.dataDir || path.join(process.cwd(), 'data'));
   const publicDir = path.resolve(options.publicDir || path.join(__dirname, '..', 'wwwroot'));
   const serverName = options.serverName || os.hostname();
+  const version = (await fsp.readFile(path.join(__dirname, '..', 'VERSION'), 'utf8')).trim();
   const trustLoopbackProxy = options.trustLoopbackProxy === true;
   const dailyMessageLimit = new DailyMessageLimit(dataDir, options.dailyMessageLimit, options.now);
   const chatStorage = await createChatStorage(options);
@@ -131,6 +132,7 @@ async function createLanDropServer(options = {}) {
       if (request.method === 'GET' && apiPath === '/api/status') {
         return sendJson(response, 200, {
           serverName,
+          version,
           room: publicRoom(room),
           onlineCount: (room.id ? uniqueClients(readyClients(clients)) : readyClients(clients)).length,
           maxUploadBytes: MAX_UPLOAD_BYTES,
@@ -319,6 +321,7 @@ async function createLanDropServer(options = {}) {
         files: fileStore.list().map((file) => publicFile(file, room.id)),
         uploads: publicActiveUploads(activeUploads),
         serverName,
+        version,
       });
       client.welcomed = true;
     };

@@ -40,6 +40,10 @@ test('聊天、上传、文件广播和下载可以完整工作', async (context
   sockets.push(alice.socket, bob.socket);
   assert.equal(alice.clientId, 'device-alice-test');
   assert.equal(bob.clientId, 'device-bob-test');
+  const version = (await fs.readFile(path.join(__dirname, '..', 'VERSION'), 'utf8')).trim();
+  assert.equal(alice.welcome.version, version);
+  assert.equal(bob.welcome.version, version);
+  assert.equal((await (await fetch(`${baseUrl}/api/status`)).json()).version, version);
 
   await alice.inbox.waitFor((message) => message.type === 'presence' && message.count === 2);
   await bob.inbox.waitFor((message) => message.type === 'presence' && message.count === 2);

@@ -110,6 +110,20 @@ textarea:focus-visible,
   font-size: 12px;
 }
 
+.brand-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-version {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 .topbar-actions {
   display: flex;
   align-items: center;
@@ -474,6 +488,41 @@ textarea:focus-visible,
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 2px 5px rgba(31, 48, 42, 0.04);
+}
+
+.file-message.image-file-message {
+  min-width: 0;
+  width: 320px;
+  max-width: 100%;
+}
+
+.image-preview,
+.image-preview-error {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: clamp(120px, 28vh, 260px);
+  background: var(--surface-soft);
+  border-radius: 6px;
+}
+
+.image-preview {
+  display: block;
+  object-fit: contain;
+}
+
+.image-preview-error {
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.image-preview[hidden],
+.image-preview-error[hidden] {
+  display: none;
 }
 
 .file-type-icon,

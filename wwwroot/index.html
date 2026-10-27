@@ -18,7 +18,10 @@
           <img src="/favicon.svg" width="34" height="34" alt="">
           <div>
             <h1>邻传</h1>
-            <span>局域网共享空间</span>
+            <div class="brand-meta">
+              <span>局域网共享空间</span>
+              <small class="app-version" id="app-version" hidden></small>
+            </div>
           </div>
         </div>
 
@@ -81,7 +84,7 @@
               id="message-input"
               rows="1"
               maxlength="2000"
-              placeholder="输入消息"
+              placeholder="输入消息或粘贴截图"
               aria-label="输入消息"
             ></textarea>
             <button class="send-button" id="send-button" type="submit" title="发送消息" aria-label="发送消息">

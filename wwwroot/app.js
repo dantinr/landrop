@@ -10,6 +10,7 @@ const elements = {
   nameInput: document.querySelector('#name-input'),
   copyAddress: document.querySelector('#copy-address'),
   serverName: document.querySelector('#server-name'),
+  appVersion: document.querySelector('#app-version'),
   roomStatus: document.querySelector('#room-status'),
   chatQuota: document.querySelector('#chat-quota'),
   historyPolicy: document.querySelector('#history-policy'),
@@ -139,6 +140,7 @@ function bindEvents() {
     resizeComposer();
     sendTypingState();
   });
+  elements.messageInput.addEventListener('paste', pasteImages);
 
   elements.nameInput.addEventListener('input', () => {
     clearTimeout(state.nameTimer);
@@ -256,6 +258,7 @@ function handleSocketPayload(payload) {
       ? payload.chatHistoryLimit : 20;
     elements.historyPolicy.textContent = `仅保留最近 ${state.chatHistoryLimit} 条聊天记录`;
     updateChatQuota(payload.chatQuota);
+    renderVersion(payload.version);
     renderRoom(payload.serverName);
     renderHistory(payload.history || []);
     replaceFiles(payload.files || []);
@@ -581,6 +584,25 @@ function createFileMessage(file) {
   const container = document.createElement('div');
   container.className = 'file-message';
 
+  if (isImageFile(file)) {
+    container.classList.add('image-file-message');
+    const image = document.createElement('img');
+    image.className = 'image-preview';
+    image.alt = file.name;
+    image.loading = 'lazy';
+    image.decoding = 'async';
+    const fallback = document.createElement('p');
+    fallback.className = 'image-preview-error';
+    fallback.textContent = '图片暂时无法预览，可下载查看';
+    fallback.hidden = true;
+    image.addEventListener('error', () => {
+      image.hidden = true;
+      fallback.hidden = false;
+    }, { once: true });
+    image.src = fileDownloadUrl(file);
+    container.append(image, fallback);
+  }
+
   const icon = document.createElement('div');
   icon.className = 'file-type-icon';
   icon.append(createIcon(fileIconName(file)));
@@ -604,14 +626,18 @@ function createFileMessage(file) {
 function createDownloadButton(file) {
   const link = document.createElement('a');
   link.className = 'download-button';
-  const downloadUrl = new URL(file.downloadUrl, location.origin);
-  if (state.roomId && state.roomSession) downloadUrl.searchParams.set('session', state.roomSession);
-  link.href = downloadUrl.href;
+  link.href = fileDownloadUrl(file);
   link.download = file.name;
   link.title = `下载 ${file.name}`;
   link.setAttribute('aria-label', `下载 ${file.name}`);
   link.append(createIcon('download'));
   return link;
+}
+
+function fileDownloadUrl(file) {
+  const url = new URL(file.downloadUrl, location.origin);
+  if (state.roomId && state.roomSession) url.searchParams.set('session', state.roomSession);
+  return url.href;
 }
 
 function clearMessageView() {
@@ -709,6 +735,7 @@ async function refreshStatus() {
     if (!response.ok) return;
     const status = await response.json();
     if (state.roomUnavailable) return;
+    renderVersion(status.version);
     renderRoom(status.serverName);
     elements.storageLabel.textContent = Number.isFinite(status.availableBytes)
       ? `可用 ${formatBytes(status.availableBytes)}`
@@ -752,6 +779,20 @@ function bindDropZone() {
 
 function hasFiles(event) {
   return Array.from(event.dataTransfer?.types || []).includes('Files');
+}
+
+function pasteImages(event) {
+  const clipboard = event.clipboardData;
+  let images = Array.from(clipboard?.items || [])
+    .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+    .map((item) => item.getAsFile())
+    .filter(Boolean);
+  if (images.length === 0) {
+    images = Array.from(clipboard?.files || []).filter((file) => file.type.startsWith('image/'));
+  }
+  if (images.length === 0) return;
+  event.preventDefault();
+  uploadFiles(images);
 }
 
 function uploadFiles(fileList) {
@@ -1098,6 +1139,13 @@ function loadOwnerToken() {
   } catch {
     return undefined;
   }
+}
+
+function renderVersion(version) {
+  if (typeof version !== 'string' || !/^\d+\.\d+\.[1-9]\d$/u.test(version)) return;
+  elements.appVersion.textContent = `v${version}`;
+  elements.appVersion.setAttribute('aria-label', `版本 ${version}`);
+  elements.appVersion.hidden = false;
 }
 
 function renderRoom(serverName) {
