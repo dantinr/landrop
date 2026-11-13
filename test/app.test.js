@@ -35,6 +35,7 @@ test('聊天、上传、文件广播和下载可以完整工作', async (context
   const page = await fetch(baseUrl);
   assert.equal(page.status, 200);
   assert.match(await page.text(), /邻传/u);
+  assert.equal((await (await fetch(`${baseUrl}/api/status`)).json()).maxUploadBytes, 500 * 1024 * 1024);
 
   const alice = await connectClient(baseUrl, '小林', 'device-alice-test');
   const bob = await connectClient(baseUrl, '书房电脑', 'device-bob-test');

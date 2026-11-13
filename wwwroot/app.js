@@ -1,6 +1,6 @@
 'use strict';
 
-const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 const avatars = window.LanDropAvatars;
 
 const elements = {
@@ -936,7 +936,7 @@ function uploadFiles(fileList) {
   }
   for (const file of files) {
     if (file.size > MAX_UPLOAD_BYTES) {
-      showToast(`${file.name}：单个文件不能超过 20 MB`, true);
+      showToast(`${file.name}：单个文件不能超过 500 MB`, true);
       continue;
     }
     startUpload(file);
@@ -977,7 +977,7 @@ function startUpload(file) {
     if (xhr.status >= 200 && xhr.status < 300) {
       finishUpload(upload, 'done', '上传完成');
     } else {
-      let message = xhr.status === 413 ? '单个文件不能超过 20 MB' : '上传失败';
+      let message = xhr.status === 413 ? '单个文件不能超过 500 MB' : '上传失败';
       try { message = JSON.parse(xhr.responseText).message || message; } catch {}
       finishUpload(upload, 'failed', message);
     }

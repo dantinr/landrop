@@ -160,7 +160,7 @@ async function createLanDropServer(options = {}) {
           Number(singleHeader(request.headers['content-length'])) > MAX_UPLOAD_BYTES
           || Number(singleHeader(request.headers['x-file-size'])) > MAX_UPLOAD_BYTES
         ) {
-          throw new HttpError(413, '单个文件不能超过 20 MB', 'FILE_TOO_LARGE');
+          throw new HttpError(413, '单个文件不能超过 500 MB', 'FILE_TOO_LARGE');
         }
         if (activeUploads.has(uploadId)) {
           throw new HttpError(409, '上传任务编号重复', 'DUPLICATE_UPLOAD_ID');

@@ -10,13 +10,13 @@ const test = require('node:test');
 const { createLanDropServer } = require('../src/app');
 const { MAX_UPLOAD_BYTES } = require('../src/file-store');
 
-test('恰好 20 MB 和空文件可以上传，超限声明会立即收到 413', async (context) => {
+test('恰好 500 MB 和空文件可以上传，超限声明会立即收到 413', async (context) => {
   const { baseUrl, dataDir } = await startServer(context);
-  assert.equal(MAX_UPLOAD_BYTES, 20 * 1024 * 1024);
+  assert.equal(MAX_UPLOAD_BYTES, 500 * 1024 * 1024);
   const status = await (await fetch(`${baseUrl}/api/status`)).json();
   assert.equal(status.maxUploadBytes, MAX_UPLOAD_BYTES);
 
-  const atLimit = await upload(baseUrl, { 'Content-Length': MAX_UPLOAD_BYTES }, Buffer.alloc(MAX_UPLOAD_BYTES, 0x61));
+  const atLimit = await upload(baseUrl, { 'Content-Length': MAX_UPLOAD_BYTES }, Readable.from(Array(MAX_UPLOAD_BYTES / (1024 * 1024)).fill(Buffer.alloc(1024 * 1024, 0x61))));
   assert.equal(atLimit.status, 201);
   assert.equal(atLimit.body.file.size, MAX_UPLOAD_BYTES);
   assert.equal((await fs.stat(path.join(dataDir, 'uploads', 'limit[127.0.0.1].bin'))).size, MAX_UPLOAD_BYTES);
@@ -35,7 +35,7 @@ test('恰好 20 MB 和空文件可以上传，超限声明会立即收到 413', 
     const rejected = await upload(baseUrl, headers);
     assert.equal(rejected.status, 413);
     assert.equal(rejected.body.error, 'FILE_TOO_LARGE');
-    assert.equal(rejected.body.message, '单个文件不能超过 20 MB');
+    assert.equal(rejected.body.message, '单个文件不能超过 500 MB');
     assert.equal(rejected.headers.connection, 'close');
   }
   assert.equal((await (await fetch(`${baseUrl}/api/files`)).json()).files.length, 2);
@@ -45,14 +45,14 @@ test('恰好 20 MB 和空文件可以上传，超限声明会立即收到 413', 
 test('分块上传按实际字节限制，缺失或伪造大小提示不能绕过，拒绝后可重新上传', async (context) => {
   const { baseUrl, dataDir } = await startServer(context);
   const chunk = Buffer.alloc(1024 * 1024, 0x62);
-  const atLimit = await upload(baseUrl, {}, Readable.from(Array(20).fill(chunk)));
+  const atLimit = await upload(baseUrl, {}, Readable.from(Array(MAX_UPLOAD_BYTES / chunk.length).fill(chunk)));
   assert.equal(atLimit.status, 201);
   assert.equal(atLimit.body.file.size, MAX_UPLOAD_BYTES);
 
   for (const advertisedSize of [undefined, '1']) {
     const headers = { 'X-Upload-Id': 'upload-limit-reusable' };
     if (advertisedSize !== undefined) headers['X-File-Size'] = advertisedSize;
-    const rejected = await upload(baseUrl, headers, Readable.from([...Array(20).fill(chunk), Buffer.from('x')]));
+    const rejected = await upload(baseUrl, headers, Readable.from([...Array(MAX_UPLOAD_BYTES / chunk.length).fill(chunk), Buffer.from('x')]));
     assert.equal(rejected.status, 413);
     assert.equal(rejected.body.error, 'FILE_TOO_LARGE');
     assert.deepEqual(await fs.readdir(path.join(dataDir, 'incoming')), []);
