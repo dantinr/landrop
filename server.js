@@ -1,5 +1,6 @@
 'use strict';
 
+const { execFile } = require('node:child_process');
 const path = require('node:path');
 const { createLanDropServer, getLanAddresses } = require('./src/app');
 const { readConfig } = require('./src/config');
@@ -39,7 +40,8 @@ async function main() {
   const addresses = getLanAddresses(port);
   console.log('');
   console.log('  邻传已启动');
-  console.log('  本机访问:  http://localhost:' + port);
+  const localUrl = `http://127.0.0.1:${port}`;
+  console.log('  本机访问:  ' + localUrl);
   for (const address of addresses) {
     console.log('  局域网访问: ' + address);
   }
@@ -63,6 +65,16 @@ async function main() {
 
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+
+  if (process.platform === 'win32' && process.argv.includes('--open-browser')) {
+    // START treats its first quoted argument as a window title.
+    execFile('cmd.exe', ['/d', '/c', 'start', '""', localUrl], {
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    }, (error) => {
+      if (error) console.error('无法自动打开浏览器，请手动访问:', localUrl);
+    });
+  }
 }
 
 main().catch((error) => {

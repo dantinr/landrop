@@ -8,5 +8,5 @@ if not exist node_modules (
     exit /b 1
   )
 )
-npm start
+call npm start -- --open-browser
 if errorlevel 1 pause
